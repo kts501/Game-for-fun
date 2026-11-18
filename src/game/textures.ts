@@ -1,823 +1,502 @@
 import * as THREE from 'three';
 
+function makeCanvas(size = 256): [HTMLCanvasElement, CanvasRenderingContext2D] {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d')!;
+  return [canvas, ctx];
+}
+
 export interface ProceduralTextureSet {
   marble: THREE.CanvasTexture;
-  sandstone: THREE.CanvasTexture;
-  courtyardTile: THREE.CanvasTexture;
-  woodPlank: THREE.CanvasTexture;
-  rustedMetal: THREE.CanvasTexture;
-  bazaarWall: THREE.CanvasTexture;
-  poolWater: THREE.CanvasTexture;
-  contactShadow: THREE.CanvasTexture;
-  chainLink: THREE.CanvasTexture;
-  blueTarp: THREE.CanvasTexture;
-  jaliLattice: THREE.CanvasTexture;
-  domeRibs: THREE.CanvasTexture;
-  tealWindow: THREE.CanvasTexture;
-  nightHunterMuscle: THREE.CanvasTexture;
-  diamondPlate: THREE.CanvasTexture;
-  skinDetail: THREE.CanvasTexture;
-  charbaghGrass: THREE.CanvasTexture;
-  baseballBatWood: THREE.CanvasTexture;
-  zombieSkin: THREE.CanvasTexture;
-  zombieSkinBump: THREE.CanvasTexture;
-  zombieCloth: THREE.CanvasTexture;
-  dogFurRot: THREE.CanvasTexture;
-  dogFurBump: THREE.CanvasTexture;
-  safeHouseSign: THREE.CanvasTexture;
   pietraDura: THREE.CanvasTexture;
-  charbaghFlowerbed: THREE.CanvasTexture;
-  parkourWallPaint: THREE.CanvasTexture;
-  parkourPaintSmudge: THREE.CanvasTexture;
+  sandstone: THREE.CanvasTexture;
+  courtyardGround: THREE.CanvasTexture;
+  woodPlank: THREE.CanvasTexture;
+  corrugatedMetal: THREE.CanvasTexture;
+  hazardStripe: THREE.CanvasTexture;
+  waterNormal: THREE.CanvasTexture;
+  necroticSkin: THREE.CanvasTexture;
+  tacticalCloth: THREE.CanvasTexture;
+  weatheredHandSkin: THREE.CanvasTexture;
+  tacticalGlove: THREE.CanvasTexture;
+  tanGloveFabric: THREE.CanvasTexture;
+  brushedBladeSteel: THREE.CanvasTexture;
+  brushedSilverSlide: THREE.CanvasTexture;
+  polymerGrip: THREE.CanvasTexture;
+  watchFace: THREE.CanvasTexture;
+  sunHalo: THREE.CanvasTexture;
+  contactShadow: THREE.CanvasTexture;
   dispose: () => void;
 }
 
-function finalizeTexture(
-  canvas: HTMLCanvasElement,
-  repeatX: number,
-  repeatY: number,
-  maxAnisotropy: number,
-): THREE.CanvasTexture {
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(repeatX, repeatY);
-  tex.anisotropy = Math.min(8, maxAnisotropy);
-  tex.needsUpdate = true;
-  return tex;
-}
-
 export function createProceduralTextures(maxAnisotropy: number): ProceduralTextureSet {
-  // 1. Agra White Marble with subtle grey veins & weathered cracks
-  const marbleCanvas = document.createElement('canvas');
-  marbleCanvas.width = 256;
-  marbleCanvas.height = 256;
-  const mCtx = marbleCanvas.getContext('2d')!;
-  mCtx.fillStyle = '#efe9df';
+  // 1. White Taj Marble with delicate veining & joint lines
+  const [mCan, mCtx] = makeCanvas(256);
+  mCtx.fillStyle = '#ece9e1';
   mCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 24; i++) {
-    mCtx.strokeStyle = `rgba(145, 140, 134, ${0.12 + (i % 3) * 0.06})`;
+  for (let i = 0; i < 460; i++) {
+    mCtx.strokeStyle = i % 3 === 0 ? 'rgba(130, 138, 148, 0.16)' : 'rgba(255, 255, 255, 0.35)';
     mCtx.lineWidth = 1 + (i % 2);
     mCtx.beginPath();
-    let x = (i * 37) % 256;
-    let y = 0;
+    const x = (i * 53) % 256;
+    const y = (i * 97) % 256;
     mCtx.moveTo(x, y);
-    for (let s = 0; s < 8; s++) {
-      x += Math.sin(i + s * 1.4) * 18;
-      y += 32;
-      mCtx.lineTo(x, y);
-    }
+    mCtx.lineTo(x + ((i % 7) - 3) * 14, y + ((i % 5) - 2) * 12);
     mCtx.stroke();
   }
-  mCtx.strokeStyle = 'rgba(110, 104, 96, 0.22)';
-  mCtx.lineWidth = 1;
-  for (let y = 0; y < 256; y += 64) {
+  mCtx.strokeStyle = 'rgba(70, 74, 82, 0.24)';
+  mCtx.lineWidth = 2;
+  for (let p = 0; p <= 256; p += 64) {
     mCtx.beginPath();
-    mCtx.moveTo(0, y);
-    mCtx.lineTo(256, y);
+    mCtx.moveTo(p, 0);
+    mCtx.lineTo(p, 256);
+    mCtx.stroke();
+    mCtx.beginPath();
+    mCtx.moveTo(0, p);
+    mCtx.lineTo(256, p);
     mCtx.stroke();
   }
-  const marble = finalizeTexture(marbleCanvas, 3, 3, maxAnisotropy);
+  const marble = new THREE.CanvasTexture(mCan);
+  marble.wrapS = marble.wrapT = THREE.RepeatWrapping;
+  marble.colorSpace = THREE.SRGBColorSpace;
+  marble.anisotropy = maxAnisotropy;
 
-  // 2. Red Agra Sandstone Flagstones (Charbagh walkways)
-  const sandCanvas = document.createElement('canvas');
-  sandCanvas.width = 256;
-  sandCanvas.height = 256;
-  const sCtx = sandCanvas.getContext('2d')!;
-  sCtx.fillStyle = '#9c5240';
+  // 1b. Mughal Pietra Dura Floral Inlay & Calligraphic Marble Trim
+  const [pdCan, pdCtx] = makeCanvas(256);
+  pdCtx.fillStyle = '#eeeae0';
+  pdCtx.fillRect(0, 0, 256, 256);
+  // Subtle inlaid frame border
+  pdCtx.strokeStyle = '#374151';
+  pdCtx.lineWidth = 5;
+  pdCtx.strokeRect(10, 10, 236, 236);
+  pdCtx.strokeStyle = '#b45309';
+  pdCtx.lineWidth = 2;
+  pdCtx.strokeRect(18, 18, 220, 220);
+  // Delicate arabesque floral vine scrolls (carnelian, lapis, malachite)
+  for (let row = 42; row <= 214; row += 56) {
+    for (let col = 42; col <= 214; col += 56) {
+      pdCtx.strokeStyle = 'rgba(30, 64, 72, 0.65)';
+      pdCtx.lineWidth = 1.6;
+      pdCtx.beginPath();
+      pdCtx.moveTo(col - 20, row);
+      pdCtx.quadraticCurveTo(col, row - 18, col + 20, row);
+      pdCtx.quadraticCurveTo(col, row + 18, col - 20, row);
+      pdCtx.stroke();
+      // Carnelian flower bud
+      pdCtx.fillStyle = '#9b2c2c';
+      pdCtx.beginPath();
+      pdCtx.arc(col, row, 4.2, 0, Math.PI * 2);
+      pdCtx.fill();
+      // Malachite leaves
+      pdCtx.fillStyle = '#1f5f4a';
+      pdCtx.beginPath();
+      pdCtx.arc(col - 9, row - 4, 2.5, 0, Math.PI * 2);
+      pdCtx.arc(col + 9, row + 4, 2.5, 0, Math.PI * 2);
+      pdCtx.fill();
+    }
+  }
+  const pietraDura = new THREE.CanvasTexture(pdCan);
+  pietraDura.wrapS = pietraDura.wrapT = THREE.RepeatWrapping;
+  pietraDura.colorSpace = THREE.SRGBColorSpace;
+  pietraDura.anisotropy = maxAnisotropy;
+
+  // 2. Red Agra Sandstone Walkways & Bazaar Masonry
+  const [sCan, sCtx] = makeCanvas(256);
+  sCtx.fillStyle = '#8b4335';
   sCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 480; i++) {
-    const shade = (i % 5) * 9 - 18;
-    sCtx.fillStyle = `rgb(${156 + shade}, ${82 + shade * 0.55}, ${64 + shade * 0.45})`;
-    sCtx.fillRect((i * 73) % 256, (i * 41) % 256, 8, 5);
-  }
-  sCtx.strokeStyle = 'rgba(46, 20, 15, 0.48)';
-  sCtx.lineWidth = 2.5;
   for (let y = 0; y < 256; y += 32) {
-    sCtx.beginPath();
-    sCtx.moveTo(0, y);
-    sCtx.lineTo(256, y);
-    sCtx.stroke();
     const offset = (y / 32) % 2 === 0 ? 0 : 32;
-    for (let x = offset; x < 256; x += 64) {
-      sCtx.beginPath();
-      sCtx.moveTo(x, y);
-      sCtx.lineTo(x, y + 32);
-      sCtx.stroke();
+    for (let x = -32; x < 256; x += 64) {
+      const shade = ((x * 13 + y * 7) % 24) - 12;
+      sCtx.fillStyle = `rgb(${139 + shade}, ${67 + Math.floor(shade * 0.5)}, ${53 + Math.floor(shade * 0.4)})`;
+      sCtx.fillRect(x + offset + 1, y + 1, 62, 30);
     }
   }
-  const sandstone = finalizeTexture(sandCanvas, 4, 4, maxAnisotropy);
+  for (let i = 0; i < 650; i++) {
+    sCtx.fillStyle = i % 2 === 0 ? 'rgba(30, 15, 12, 0.16)' : 'rgba(220, 150, 120, 0.09)';
+    sCtx.fillRect((i * 73) % 256, (i * 41) % 256, 3, 2);
+  }
+  const sandstone = new THREE.CanvasTexture(sCan);
+  sandstone.wrapS = sandstone.wrapT = THREE.RepeatWrapping;
+  sandstone.colorSpace = THREE.SRGBColorSpace;
+  sandstone.anisotropy = maxAnisotropy;
 
-  // 3. Cracked Courtyard Stone Pavement
-  const tileCanvas = document.createElement('canvas');
-  tileCanvas.width = 256;
-  tileCanvas.height = 256;
-  const tCtx = tileCanvas.getContext('2d')!;
-  tCtx.fillStyle = '#57534e';
-  tCtx.fillRect(0, 0, 256, 256);
-  for (let y = 0; y < 256; y += 64) {
-    for (let x = 0; x < 256; x += 64) {
-      const tone = 72 + ((x * 3 + y * 5) % 24);
-      tCtx.fillStyle = `rgb(${tone + 6}, ${tone + 2}, ${tone - 4})`;
-      tCtx.fillRect(x + 2, y + 2, 60, 60);
-    }
+  // 3. Overgrown Charbagh Courtyard Lawn & Dirt
+  const [gCan, gCtx] = makeCanvas(256);
+  gCtx.fillStyle = '#243023';
+  gCtx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 950; i++) {
+    const green = i % 3 !== 0;
+    gCtx.fillStyle = green ? 'rgba(48, 78, 44, 0.36)' : 'rgba(54, 45, 36, 0.32)';
+    gCtx.fillRect((i * 67) % 256, (i * 89) % 256, 4 + (i % 4), 4 + (i % 3));
   }
-  tCtx.strokeStyle = 'rgba(24, 24, 27, 0.55)';
-  tCtx.lineWidth = 2;
-  for (let i = 0; i < 12; i++) {
+  const courtyardGround = new THREE.CanvasTexture(gCan);
+  courtyardGround.wrapS = courtyardGround.wrapT = THREE.RepeatWrapping;
+  courtyardGround.repeat.set(24, 24);
+  courtyardGround.colorSpace = THREE.SRGBColorSpace;
+  courtyardGround.anisotropy = maxAnisotropy;
+
+  // 4. Weathered Wooden Parkour Ramp Planks
+  const [pCan, pCtx] = makeCanvas(256);
+  pCtx.fillStyle = '#6c4b2e';
+  pCtx.fillRect(0, 0, 256, 256);
+  for (let y = 0; y < 256; y += 32) {
+    const tone = ((y * 7) % 20) - 10;
+    pCtx.fillStyle = `rgb(${108 + tone}, ${75 + tone}, ${46 + Math.floor(tone * 0.6)})`;
+    pCtx.fillRect(0, y + 1, 256, 30);
+    pCtx.strokeStyle = 'rgba(34, 22, 12, 0.35)';
+    pCtx.lineWidth = 2;
+    pCtx.beginPath();
+    pCtx.moveTo(0, y);
+    pCtx.lineTo(256, y);
+    pCtx.stroke();
+  }
+  const woodPlank = new THREE.CanvasTexture(pCan);
+  woodPlank.wrapS = woodPlank.wrapT = THREE.RepeatWrapping;
+  woodPlank.colorSpace = THREE.SRGBColorSpace;
+  woodPlank.anisotropy = maxAnisotropy;
+
+  // 4b. Corrugated Tin Awning Sheet
+  const [cmCan, cmCtx] = makeCanvas(128);
+  cmCtx.fillStyle = '#55606b';
+  cmCtx.fillRect(0, 0, 128, 128);
+  for (let x = 0; x < 128; x += 8) {
+    cmCtx.fillStyle = x % 16 === 0 ? 'rgba(255,255,255,0.16)' : 'rgba(15,20,25,0.28)';
+    cmCtx.fillRect(x, 0, 4, 128);
+  }
+  for (let i = 0; i < 70; i++) {
+    cmCtx.fillStyle = 'rgba(120, 62, 32, 0.24)';
+    cmCtx.fillRect((i * 37) % 128, (i * 53) % 128, 6, 4);
+  }
+  const corrugatedMetal = new THREE.CanvasTexture(cmCan);
+  corrugatedMetal.wrapS = corrugatedMetal.wrapT = THREE.RepeatWrapping;
+  corrugatedMetal.colorSpace = THREE.SRGBColorSpace;
+  corrugatedMetal.anisotropy = maxAnisotropy;
+
+  // 4c. Quarantine Hazard Stripes
+  const [hzCan, hzCtx] = makeCanvas(128);
+  hzCtx.fillStyle = '#d99a1e';
+  hzCtx.fillRect(0, 0, 128, 128);
+  hzCtx.fillStyle = '#18181b';
+  for (let i = -128; i < 256; i += 32) {
+    hzCtx.beginPath();
+    hzCtx.moveTo(i, 0);
+    hzCtx.lineTo(i + 16, 0);
+    hzCtx.lineTo(i - 48, 128);
+    hzCtx.lineTo(i - 64, 128);
+    hzCtx.closePath();
+    hzCtx.fill();
+  }
+  const hazardStripe = new THREE.CanvasTexture(hzCan);
+  hazardStripe.wrapS = hazardStripe.wrapT = THREE.RepeatWrapping;
+  hazardStripe.colorSpace = THREE.SRGBColorSpace;
+  hazardStripe.anisotropy = maxAnisotropy;
+
+  // 5. Water Ripple Normal Map (linear)
+  const [wCan, wCtx] = makeCanvas(256);
+  wCtx.fillStyle = 'rgb(128, 128, 255)';
+  wCtx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 180; i++) {
+    const cx = (i * 47) % 256;
+    const cy = (i * 83) % 256;
+    const r = 8 + (i % 14);
+    const grad = wCtx.createRadialGradient(cx, cy, 1, cx, cy, r);
+    grad.addColorStop(0, 'rgba(148, 118, 255, 0.35)');
+    grad.addColorStop(0.5, 'rgba(110, 146, 255, 0.25)');
+    grad.addColorStop(1, 'rgba(128, 128, 255, 0)');
+    wCtx.fillStyle = grad;
+    wCtx.beginPath();
+    wCtx.arc(cx, cy, r, 0, Math.PI * 2);
+    wCtx.fill();
+  }
+  const waterNormal = new THREE.CanvasTexture(wCan);
+  waterNormal.wrapS = waterNormal.wrapT = THREE.RepeatWrapping;
+  waterNormal.repeat.set(3, 14);
+
+  // 6. Mottled Necrotic Infected Skin (veins, bruising, decay patches)
+  const [nCan, nCtx] = makeCanvas(256);
+  nCtx.fillStyle = '#9aa08b';
+  nCtx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 380; i++) {
+    const cx = (i * 43) % 256;
+    const cy = (i * 79) % 256;
+    const r = 4 + (i % 12);
+    nCtx.fillStyle =
+      i % 4 === 0
+        ? 'rgba(118, 26, 30, 0.34)'
+        : i % 3 === 0
+          ? 'rgba(54, 65, 52, 0.32)'
+          : 'rgba(182, 186, 162, 0.22)';
+    nCtx.beginPath();
+    nCtx.arc(cx, cy, r, 0, Math.PI * 2);
+    nCtx.fill();
+  }
+  // Dark necrotic veins
+  nCtx.strokeStyle = 'rgba(42, 24, 34, 0.45)';
+  nCtx.lineWidth = 1.4;
+  for (let i = 0; i < 45; i++) {
+    let vx = (i * 59) % 256;
+    let vy = (i * 37) % 256;
+    nCtx.beginPath();
+    nCtx.moveTo(vx, vy);
+    for (let s = 0; s < 4; s++) {
+      vx += ((i + s) % 2 === 0 ? 1 : -1) * (8 + s * 5);
+      vy += 9;
+      nCtx.lineTo(vx, vy);
+    }
+    nCtx.stroke();
+  }
+  const necroticSkin = new THREE.CanvasTexture(nCan);
+  necroticSkin.wrapS = necroticSkin.wrapT = THREE.RepeatWrapping;
+  necroticSkin.colorSpace = THREE.SRGBColorSpace;
+
+  // 7. Tactical Cloth
+  const [tCan, tCtx] = makeCanvas(128);
+  tCtx.fillStyle = '#4b524b';
+  tCtx.fillRect(0, 0, 128, 128);
+  tCtx.strokeStyle = 'rgba(20, 24, 22, 0.25)';
+  for (let i = 0; i < 128; i += 4) {
     tCtx.beginPath();
-    const sx = (i * 59) % 256;
-    const sy = (i * 83) % 256;
-    tCtx.moveTo(sx, sy);
-    tCtx.lineTo(sx + 22, sy + 16);
-    tCtx.lineTo(sx + 34, sy + 36);
+    tCtx.moveTo(i, 0);
+    tCtx.lineTo(i, 128);
+    tCtx.stroke();
+    tCtx.beginPath();
+    tCtx.moveTo(0, i);
+    tCtx.lineTo(128, i);
     tCtx.stroke();
   }
-  const courtyardTile = finalizeTexture(tileCanvas, 18, 18, maxAnisotropy);
+  const tacticalCloth = new THREE.CanvasTexture(tCan);
+  tacticalCloth.wrapS = tacticalCloth.wrapT = THREE.RepeatWrapping;
+  tacticalCloth.colorSpace = THREE.SRGBColorSpace;
 
-  // 4. Weathered Wood Planks
-  const woodCanvas = document.createElement('canvas');
-  woodCanvas.width = 256;
-  woodCanvas.height = 256;
-  const wCtx = woodCanvas.getContext('2d')!;
-  wCtx.fillStyle = '#7c5333';
-  wCtx.fillRect(0, 0, 256, 256);
-  for (let x = 0; x < 256; x += 64) {
-    wCtx.fillStyle = x % 128 === 0 ? '#744c2e' : '#855a39';
-    wCtx.fillRect(x + 2, 0, 60, 256);
-    wCtx.strokeStyle = 'rgba(46, 28, 14, 0.45)';
-    wCtx.lineWidth = 1.5;
-    for (let g = 0; g < 10; g++) {
-      const gx = x + 6 + g * 5;
-      wCtx.beginPath();
-      wCtx.moveTo(gx, 0);
-      wCtx.lineTo(gx + Math.sin(g) * 3, 256);
-      wCtx.stroke();
-    }
-  }
-  const woodPlank = finalizeTexture(woodCanvas, 2, 2, maxAnisotropy);
-
-  // 5. Rusted Corrugated Metal
-  const metalCanvas = document.createElement('canvas');
-  metalCanvas.width = 256;
-  metalCanvas.height = 256;
-  const rCtx = metalCanvas.getContext('2d')!;
-  rCtx.fillStyle = '#474c52';
-  rCtx.fillRect(0, 0, 256, 256);
-  for (let x = 0; x < 256; x += 16) {
-    rCtx.fillStyle = x % 32 === 0 ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.16)';
-    rCtx.fillRect(x, 0, 8, 256);
-  }
-  for (let i = 0; i < 60; i++) {
-    rCtx.fillStyle = `rgba(138, 66, 32, ${0.22 + (i % 4) * 0.1})`;
-    rCtx.beginPath();
-    rCtx.arc((i * 47) % 256, (i * 89) % 256, 6 + (i % 14), 0, Math.PI * 2);
-    rCtx.fill();
-  }
-  const rustedMetal = finalizeTexture(metalCanvas, 2, 2, maxAnisotropy);
-
-  // 6. Weathered Bazaar Plaster Wall
-  const wallCanvas = document.createElement('canvas');
-  wallCanvas.width = 256;
-  wallCanvas.height = 256;
-  const bCtx = wallCanvas.getContext('2d')!;
-  bCtx.fillStyle = '#c4a987';
-  bCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 80; i++) {
-    bCtx.fillStyle = i % 2 === 0 ? 'rgba(92, 74, 52, 0.14)' : 'rgba(235, 220, 198, 0.14)';
-    bCtx.fillRect((i * 53) % 256, (i * 37) % 256, 26, 18);
-  }
-  bCtx.fillStyle = 'rgba(48, 36, 28, 0.35)';
-  bCtx.fillRect(0, 224, 256, 32);
-  const bazaarWall = finalizeTexture(wallCanvas, 2, 2, maxAnisotropy);
-
-  // 7. Reflecting Pool Turquoise Rippled Water Sheen
-  const poolCanvas = document.createElement('canvas');
-  poolCanvas.width = 256;
-  poolCanvas.height = 256;
-  const pCtx = poolCanvas.getContext('2d')!;
-  pCtx.fillStyle = '#1b5b63';
-  pCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 64; i++) {
-    pCtx.fillStyle = i % 2 === 0 ? 'rgba(110, 210, 215, 0.22)' : 'rgba(14, 52, 60, 0.3)';
-    pCtx.beginPath();
-    pCtx.ellipse((i * 61) % 256, (i * 43) % 256, 26, 6, 0.1, 0, Math.PI * 2);
-    pCtx.fill();
-  }
-  const poolWater = finalizeTexture(poolCanvas, 2, 12, maxAnisotropy);
-
-  // 8. Soft Radial Contact Shadow
-  const shadowCanvas = document.createElement('canvas');
-  shadowCanvas.width = 128;
-  shadowCanvas.height = 128;
-  const shCtx = shadowCanvas.getContext('2d')!;
-  const grad = shCtx.createRadialGradient(64, 64, 8, 64, 64, 62);
-  grad.addColorStop(0, 'rgba(0, 0, 0, 0.65)');
-  grad.addColorStop(0.55, 'rgba(0, 0, 0, 0.25)');
-  grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
-  shCtx.fillStyle = grad;
-  shCtx.fillRect(0, 0, 128, 128);
-  const contactShadow = new THREE.CanvasTexture(shadowCanvas);
-  contactShadow.colorSpace = THREE.SRGBColorSpace;
-  contactShadow.needsUpdate = true;
-
-  // 9. Chain-Link Quarantine Fence (transparent diamond wire mesh)
-  const fenceCanvas = document.createElement('canvas');
-  fenceCanvas.width = 128;
-  fenceCanvas.height = 128;
-  const fCtx = fenceCanvas.getContext('2d')!;
-  fCtx.clearRect(0, 0, 128, 128);
-  fCtx.strokeStyle = '#9ca3af';
-  fCtx.lineWidth = 3;
-  for (let i = -128; i < 256; i += 24) {
-    fCtx.beginPath();
-    fCtx.moveTo(i, 0);
-    fCtx.lineTo(i + 128, 128);
-    fCtx.stroke();
-    fCtx.beginPath();
-    fCtx.moveTo(i + 128, 0);
-    fCtx.lineTo(i, 128);
-    fCtx.stroke();
-  }
-  const chainLink = finalizeTexture(fenceCanvas, 4, 2, maxAnisotropy);
-
-  // 10. Blue Parkour Landing Tarp (with stitched grid & white landing arrow/cross)
-  const tarpCanvas = document.createElement('canvas');
-  tarpCanvas.width = 256;
-  tarpCanvas.height = 256;
-  const tpCtx = tarpCanvas.getContext('2d')!;
-  tpCtx.fillStyle = '#0284c7';
-  tpCtx.fillRect(0, 0, 256, 256);
-  tpCtx.strokeStyle = 'rgba(186, 230, 253, 0.28)';
-  tpCtx.lineWidth = 2;
-  for (let i = 0; i < 256; i += 32) {
-    tpCtx.beginPath();
-    tpCtx.moveTo(i, 0);
-    tpCtx.lineTo(i, 256);
-    tpCtx.stroke();
-    tpCtx.beginPath();
-    tpCtx.moveTo(0, i);
-    tpCtx.lineTo(256, i);
-    tpCtx.stroke();
-  }
-  tpCtx.strokeStyle = '#f8fafc';
-  tpCtx.lineWidth = 8;
-  tpCtx.strokeRect(18, 18, 220, 220);
-  tpCtx.fillStyle = 'rgba(250, 204, 21, 0.9)';
-  tpCtx.fillRect(114, 72, 28, 112);
-  tpCtx.fillRect(72, 114, 112, 28);
-  const blueTarp = finalizeTexture(tarpCanvas, 1, 1, maxAnisotropy);
-
-  // 11. Pierced Carved Mughal Marble Jali Lattice Screen (alpha cutout matching Taj interior photos!)
-  const jaliCanvas = document.createElement('canvas');
-  jaliCanvas.width = 128;
-  jaliCanvas.height = 128;
-  const jCtx = jaliCanvas.getContext('2d')!;
-  jCtx.fillStyle = '#ede7dc';
-  jCtx.fillRect(0, 0, 128, 128);
-  // Subtle pietra dura border around screen
-  jCtx.strokeStyle = '#991b1b';
-  jCtx.lineWidth = 3;
-  jCtx.strokeRect(5, 5, 118, 118);
-  jCtx.strokeStyle = '#15803d';
-  jCtx.lineWidth = 1.5;
-  jCtx.strokeRect(9, 9, 110, 110);
-  // Carve transparent lattice diamonds through marble
-  jCtx.globalCompositeOperation = 'destination-out';
-  for (let y = 14; y < 114; y += 16) {
-    for (let x = 14; x < 114; x += 16) {
-      jCtx.beginPath();
-      jCtx.moveTo(x + 6, y);
-      jCtx.lineTo(x + 12, y + 6);
-      jCtx.lineTo(x + 6, y + 12);
-      jCtx.lineTo(x, y + 6);
-      jCtx.closePath();
-      jCtx.fill();
-    }
-  }
-  jCtx.globalCompositeOperation = 'source-over';
-  const jaliLattice = finalizeTexture(jaliCanvas, 2, 1, maxAnisotropy);
-
-  // 12. Taj Interior Concentric Diamond Muqarnas Dome Pattern + Dark Teal Window Glass
-  const domeCanvas = document.createElement('canvas');
-  domeCanvas.width = 256;
-  domeCanvas.height = 256;
-  const dCtx = domeCanvas.getContext('2d')!;
-  dCtx.fillStyle = '#eae4da';
-  dCtx.fillRect(0, 0, 256, 256);
-  dCtx.strokeStyle = 'rgba(100, 92, 82, 0.55)';
-  dCtx.lineWidth = 2;
-  for (let y = 0; y < 256; y += 16) {
-    for (let x = 0; x < 256; x += 16) {
-      dCtx.beginPath();
-      dCtx.moveTo(x + 8, y);
-      dCtx.lineTo(x + 16, y + 8);
-      dCtx.lineTo(x + 8, y + 16);
-      dCtx.lineTo(x, y + 8);
-      dCtx.closePath();
-      dCtx.stroke();
-    }
-  }
-  const domeRibs = finalizeTexture(domeCanvas, 10, 5, maxAnisotropy);
-
-  // 13. Upper Gallery Teal-Tinted Leaded Glass Window
-  const winCanvas = document.createElement('canvas');
-  winCanvas.width = 128;
-  winCanvas.height = 128;
-  const wnCtx = winCanvas.getContext('2d')!;
-  wnCtx.fillStyle = '#5f8d96';
-  wnCtx.fillRect(0, 0, 128, 128);
-  wnCtx.strokeStyle = '#e5dfd5';
-  wnCtx.lineWidth = 4;
-  for (let x = 0; x <= 128; x += 24) {
-    wnCtx.beginPath();
-    wnCtx.moveTo(x, 0);
-    wnCtx.lineTo(x, 128);
-    wnCtx.stroke();
-  }
-  for (let y = 0; y <= 128; y += 24) {
-    wnCtx.beginPath();
-    wnCtx.moveTo(0, y);
-    wnCtx.lineTo(128, y);
-    wnCtx.stroke();
-  }
-  const tealWindow = finalizeTexture(winCanvas, 1, 1, maxAnisotropy);
-
-  // 14. Night Hunter Exposed Striated Crimson Muscle & Scarred Pale Fascia
-  const nhCanvas = document.createElement('canvas');
-  nhCanvas.width = 256;
-  nhCanvas.height = 256;
-  const nhCtx = nhCanvas.getContext('2d')!;
-  nhCtx.fillStyle = '#4a181e';
-  nhCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 42; i++) {
-    nhCtx.strokeStyle = i % 3 === 0 ? 'rgba(218, 205, 200, 0.35)' : 'rgba(138, 24, 34, 0.65)';
-    nhCtx.lineWidth = i % 3 === 0 ? 2 : 3.5;
-    nhCtx.beginPath();
-    const y0 = (i * 11) % 256;
-    nhCtx.moveTo(0, y0);
-    nhCtx.bezierCurveTo(85, y0 + Math.sin(i) * 18, 170, y0 - Math.cos(i) * 18, 256, (y0 + 24) % 256);
-    nhCtx.stroke();
-  }
-  for (let i = 0; i < 28; i++) {
-    nhCtx.fillStyle = i % 2 === 0 ? 'rgba(30, 8, 12, 0.5)' : 'rgba(185, 38, 46, 0.42)';
-    nhCtx.beginPath();
-    nhCtx.ellipse((i * 59) % 256, (i * 83) % 256, 14, 7, (i % 5) * 0.4, 0, Math.PI * 2);
-    nhCtx.fill();
-  }
-  const nightHunterMuscle = finalizeTexture(nhCanvas, 2, 2, maxAnisotropy);
-
-  // 15. Industrial Steel Diamond-Plate Catwalk Grating (Pic 2!)
-  const dpCanvas = document.createElement('canvas');
-  dpCanvas.width = 128;
-  dpCanvas.height = 128;
-  const dpCtx = dpCanvas.getContext('2d')!;
-  dpCtx.fillStyle = '#383e46';
-  dpCtx.fillRect(0, 0, 128, 128);
-  for (let y = 8; y < 128; y += 16) {
-    for (let x = 8; x < 128; x += 16) {
-      dpCtx.save();
-      dpCtx.translate(x, y);
-      dpCtx.rotate(((x + y) / 16) % 2 === 0 ? Math.PI / 4 : -Math.PI / 4);
-      dpCtx.fillStyle = '#646e7a';
-      dpCtx.fillRect(-4, -1.5, 8, 3);
-      dpCtx.restore();
-    }
-  }
-  const diamondPlate = finalizeTexture(dpCanvas, 4, 2, maxAnisotropy);
-
-  // 16. Weathered First-Person Skin Texture with Subtle Veins, Knuckles & Grime
-  const skCanvas = document.createElement('canvas');
-  skCanvas.width = 128;
-  skCanvas.height = 128;
-  const skCtx = skCanvas.getContext('2d')!;
-  skCtx.fillStyle = '#c8926f';
-  skCtx.fillRect(0, 0, 128, 128);
-  for (let i = 0; i < 24; i++) {
-    skCtx.fillStyle = i % 2 === 0 ? 'rgba(98, 56, 38, 0.14)' : 'rgba(235, 194, 162, 0.16)';
-    skCtx.beginPath();
-    skCtx.ellipse((i * 41) % 128, (i * 29) % 128, 12, 6, 0.2, 0, Math.PI * 2);
-    skCtx.fill();
-  }
-  skCtx.strokeStyle = 'rgba(72, 48, 42, 0.18)';
-  skCtx.lineWidth = 1.5;
-  for (let v = 0; v < 5; v++) {
-    skCtx.beginPath();
-    skCtx.moveTo(18 + v * 22, 0);
-    skCtx.lineTo(24 + v * 20, 128);
-    skCtx.stroke();
-  }
-  const skinDetail = finalizeTexture(skCanvas, 1, 1, maxAnisotropy);
-
-  // 17. Charbagh Lush Overgrown Garden Lawn Turf
-  const grassCanvas = document.createElement('canvas');
-  grassCanvas.width = 256;
-  grassCanvas.height = 256;
-  const gCtx = grassCanvas.getContext('2d')!;
-  gCtx.fillStyle = '#3f5e2c';
-  gCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 650; i++) {
-    const gx = (i * 47) % 256;
-    const gy = (i * 83) % 256;
-    gCtx.fillStyle =
-      i % 4 === 0
-        ? 'rgba(104, 134, 58, 0.36)'
-        : i % 3 === 0
-          ? 'rgba(42, 68, 28, 0.42)'
-          : 'rgba(132, 128, 62, 0.22)';
-    gCtx.fillRect(gx, gy, 3, 7);
-  }
-  const charbaghGrass = finalizeTexture(grassCanvas, 6, 12, maxAnisotropy);
-
-  // 18. Weathered Ash Wood Baseball Bat Grain, Scuffs & Dried Blood Spatters
-  const batCanvas = document.createElement('canvas');
-  batCanvas.width = 256;
-  batCanvas.height = 256;
-  const btCtx = batCanvas.getContext('2d')!;
-  btCtx.fillStyle = '#9c7349';
-  btCtx.fillRect(0, 0, 256, 256);
-  for (let x = 0; x < 256; x += 5) {
-    btCtx.strokeStyle = x % 10 === 0 ? 'rgba(68, 40, 18, 0.42)' : 'rgba(205, 172, 128, 0.24)';
-    btCtx.lineWidth = 2;
-    btCtx.beginPath();
-    btCtx.moveTo(x, 0);
-    for (let y = 0; y <= 256; y += 32) {
-      btCtx.lineTo(x + Math.sin(y * 0.04 + x * 0.15) * 4, y);
-    }
-    btCtx.stroke();
-  }
-  for (let s = 0; s < 36; s++) {
-    btCtx.fillStyle = s % 2 === 0 ? 'rgba(92, 14, 14, 0.56)' : 'rgba(34, 22, 16, 0.36)';
-    btCtx.beginPath();
-    btCtx.ellipse((s * 53) % 256, (s * 79) % 256, 13 + (s % 7), 4 + (s % 4), (s % 4) * 0.4, 0, Math.PI * 2);
-    btCtx.fill();
-  }
-  const baseballBatWood = finalizeTexture(batCanvas, 1, 1, maxAnisotropy);
-
-  // 19. Necrotic Zombie Skin (pale gray-green mottled flesh, dark veins, bruises & crimson blood splatters)
-  const zsCanvas = document.createElement('canvas');
-  zsCanvas.width = 256;
-  zsCanvas.height = 256;
-  const zsCtx = zsCanvas.getContext('2d')!;
-  zsCtx.fillStyle = '#7e8f77';
-  zsCtx.fillRect(0, 0, 256, 256);
-  // Bruised necrotic mottling
-  for (let i = 0; i < 48; i++) {
-    zsCtx.fillStyle = i % 3 === 0 ? 'rgba(64, 54, 72, 0.28)' : i % 2 === 0 ? 'rgba(84, 96, 68, 0.34)' : 'rgba(148, 160, 134, 0.24)';
-    zsCtx.beginPath();
-    zsCtx.ellipse((i * 53) % 256, (i * 79) % 256, 18 + (i % 14), 10 + (i % 8), (i % 5) * 0.4, 0, Math.PI * 2);
-    zsCtx.fill();
-  }
-  // Dark branching necrotic veins
-  zsCtx.strokeStyle = 'rgba(32, 38, 44, 0.46)';
-  zsCtx.lineWidth = 1.6;
-  for (let v = 0; v < 18; v++) {
-    zsCtx.beginPath();
-    let vx = (v * 37) % 256;
-    let vy = (v * 59) % 256;
-    zsCtx.moveTo(vx, vy);
-    for (let s = 0; s < 5; s++) {
-      vx += Math.sin(v + s * 1.3) * 14;
-      vy += 12;
-      zsCtx.lineTo(vx, vy);
-    }
-    zsCtx.stroke();
-  }
-  // Crimson blood splatters & grime
-  for (let b = 0; b < 22; b++) {
-    zsCtx.fillStyle = b % 2 === 0 ? 'rgba(138, 18, 22, 0.62)' : 'rgba(78, 12, 14, 0.55)';
-    zsCtx.beginPath();
-    zsCtx.ellipse((b * 71) % 256, (b * 43) % 256, 9 + (b % 10), 6 + (b % 7), (b % 4) * 0.5, 0, Math.PI * 2);
-    zsCtx.fill();
-  }
-  const zombieSkin = finalizeTexture(zsCanvas, 1, 1, maxAnisotropy);
-
-  // 20. Zombie Skin Bump/Roughness Map (linear grayscale height detail)
-  const zbCanvas = document.createElement('canvas');
-  zbCanvas.width = 256;
-  zbCanvas.height = 256;
-  const zbCtx = zbCanvas.getContext('2d')!;
-  zbCtx.fillStyle = '#808080';
-  zbCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 320; i++) {
-    const shade = 95 + ((i * 29) % 70);
-    zbCtx.fillStyle = `rgb(${shade}, ${shade}, ${shade})`;
-    zbCtx.fillRect((i * 41) % 256, (i * 67) % 256, 5, 4);
-  }
-  zbCtx.strokeStyle = 'rgba(40, 40, 40, 0.55)';
-  zbCtx.lineWidth = 2;
-  for (let v = 0; v < 18; v++) {
-    zbCtx.beginPath();
-    let vx = (v * 37) % 256;
-    let vy = (v * 59) % 256;
-    zbCtx.moveTo(vx, vy);
-    for (let s = 0; s < 5; s++) {
-      vx += Math.sin(v + s * 1.3) * 14;
-      vy += 12;
-      zbCtx.lineTo(vx, vy);
-    }
-    zbCtx.stroke();
-  }
-  const zombieSkinBump = new THREE.CanvasTexture(zbCanvas);
-  zombieSkinBump.colorSpace = THREE.NoColorSpace;
-  zombieSkinBump.wrapS = THREE.RepeatWrapping;
-  zombieSkinBump.wrapT = THREE.RepeatWrapping;
-  zombieSkinBump.anisotropy = Math.min(8, maxAnisotropy);
-  zombieSkinBump.needsUpdate = true;
-
-  // 21. Ragged Grimy Clothing Fabric Texture
-  const zcCanvas = document.createElement('canvas');
-  zcCanvas.width = 256;
-  zcCanvas.height = 256;
-  const zcCtx = zcCanvas.getContext('2d')!;
-  zcCtx.fillStyle = '#c8c4bc';
-  zcCtx.fillRect(0, 0, 256, 256);
-  for (let y = 0; y < 256; y += 4) {
-    zcCtx.fillStyle = y % 8 === 0 ? 'rgba(60, 56, 48, 0.16)' : 'rgba(255, 255, 255, 0.1)';
-    zcCtx.fillRect(0, y, 256, 2);
-  }
-  for (let x = 0; x < 256; x += 4) {
-    zcCtx.fillStyle = x % 8 === 0 ? 'rgba(50, 46, 40, 0.14)' : 'rgba(240, 236, 228, 0.08)';
-    zcCtx.fillRect(x, 0, 2, 256);
-  }
-  for (let i = 0; i < 34; i++) {
-    zcCtx.fillStyle = i % 3 === 0 ? 'rgba(115, 22, 22, 0.45)' : 'rgba(54, 46, 36, 0.35)';
-    zcCtx.beginPath();
-    zcCtx.ellipse((i * 57) % 256, (i * 89) % 256, 16, 11, 0.4, 0, Math.PI * 2);
-    zcCtx.fill();
-  }
-  const zombieCloth = finalizeTexture(zcCanvas, 1, 1, maxAnisotropy);
-
-  // 22. Infected Dog Dark Charred-Sable Fur, Mange & Blood Lesion Texture
-  const dfCanvas = document.createElement('canvas');
-  dfCanvas.width = 256;
-  dfCanvas.height = 256;
-  const dfCtx = dfCanvas.getContext('2d')!;
-  dfCtx.fillStyle = '#2d241e';
-  dfCtx.fillRect(0, 0, 256, 256);
+  // 7b. Weathered Sun-Tanned Hand Skin (subtle dirt, knuckle scuffs, and pores)
+  const [hsCan, hsCtx] = makeCanvas(256);
+  hsCtx.fillStyle = '#b4744f';
+  hsCtx.fillRect(0, 0, 256, 256);
   for (let i = 0; i < 420; i++) {
-    const fx = (i * 37) % 256;
-    const fy = (i * 73) % 256;
-    dfCtx.strokeStyle =
-      i % 3 === 0 ? 'rgba(18, 14, 12, 0.7)' : i % 3 === 1 ? 'rgba(84, 66, 52, 0.42)' : 'rgba(42, 32, 26, 0.56)';
-    dfCtx.lineWidth = 1.6;
-    dfCtx.beginPath();
-    dfCtx.moveTo(fx, fy);
-    dfCtx.lineTo(fx + ((i % 5) - 2) * 2, fy + 10 + (i % 6));
-    dfCtx.stroke();
+    const px = (i * 59) % 256;
+    const py = (i * 97) % 256;
+    const r = 3 + (i % 9);
+    hsCtx.fillStyle =
+      i % 5 === 0
+        ? 'rgba(72, 42, 28, 0.16)'
+        : i % 4 === 0
+          ? 'rgba(218, 162, 122, 0.16)'
+          : 'rgba(138, 82, 54, 0.14)';
+    hsCtx.beginPath();
+    hsCtx.arc(px, py, r, 0, Math.PI * 2);
+    hsCtx.fill();
   }
-  // Patchy mange & raw crimson flesh tears
-  for (let w = 0; w < 24; w++) {
-    const wx = (w * 61 + 19) % 256;
-    const wy = (w * 89 + 11) % 256;
-    dfCtx.fillStyle = w % 2 === 0 ? 'rgba(128, 20, 22, 0.78)' : 'rgba(72, 14, 14, 0.68)';
-    dfCtx.beginPath();
-    dfCtx.ellipse(wx, wy, 12 + (w % 10), 8 + (w % 6), (w % 3) * 0.6, 0, Math.PI * 2);
-    dfCtx.fill();
+  // Subtle knuckle/skin abrasion scuffs
+  for (let i = 0; i < 14; i++) {
+    hsCtx.strokeStyle = i % 2 === 0 ? 'rgba(116, 26, 20, 0.34)' : 'rgba(56, 34, 24, 0.28)';
+    hsCtx.lineWidth = 2.2;
+    hsCtx.beginPath();
+    const sx = 32 + ((i * 37) % 192);
+    const sy = 40 + ((i * 53) % 176);
+    hsCtx.moveTo(sx, sy);
+    hsCtx.lineTo(sx + 10 + (i % 8), sy + 4 - (i % 7));
+    hsCtx.stroke();
   }
-  const dogFurRot = finalizeTexture(dfCanvas, 1, 1, maxAnisotropy);
+  const weatheredHandSkin = new THREE.CanvasTexture(hsCan);
+  weatheredHandSkin.wrapS = weatheredHandSkin.wrapT = THREE.RepeatWrapping;
+  weatheredHandSkin.colorSpace = THREE.SRGBColorSpace;
+  weatheredHandSkin.anisotropy = maxAnisotropy;
 
-  // 23. Infected Dog Fur & Tendon Bump Map (NoColorSpace)
-  const dbCanvas = document.createElement('canvas');
-  dbCanvas.width = 256;
-  dbCanvas.height = 256;
-  const dbCtx = dbCanvas.getContext('2d')!;
-  dbCtx.fillStyle = '#7c7c7c';
-  dbCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 520; i++) {
-    const fx = (i * 43) % 256;
-    const fy = (i * 67) % 256;
-    const v = 90 + ((i * 31) % 110);
-    dbCtx.strokeStyle = `rgb(${v}, ${v}, ${v})`;
-    dbCtx.lineWidth = 1.5;
-    dbCtx.beginPath();
-    dbCtx.moveTo(fx, fy);
-    dbCtx.lineTo(fx + ((i % 3) - 1) * 2, fy + 9);
-    dbCtx.stroke();
-  }
-  const dogFurBump = new THREE.CanvasTexture(dbCanvas);
-  dogFurBump.colorSpace = THREE.NoColorSpace;
-  dogFurBump.wrapS = THREE.RepeatWrapping;
-  dogFurBump.wrapT = THREE.RepeatWrapping;
-  dogFurBump.anisotropy = Math.min(8, maxAnisotropy);
-  dogFurBump.needsUpdate = true;
-
-  // 24. Glowing SAFE HOUSE Banner Sign Texture (Taj Mahal UV Gate)
-  const shSignCanvas = document.createElement('canvas');
-  shSignCanvas.width = 512;
-  shSignCanvas.height = 128;
-  const ssCtx = shSignCanvas.getContext('2d')!;
-  ssCtx.fillStyle = '#072219';
-  ssCtx.fillRect(0, 0, 512, 128);
-  ssCtx.strokeStyle = '#34d399';
-  ssCtx.lineWidth = 8;
-  ssCtx.strokeRect(8, 8, 496, 112);
-  ssCtx.fillStyle = '#ecfdf5';
-  ssCtx.font = 'bold 62px sans-serif';
-  ssCtx.textAlign = 'center';
-  ssCtx.textBaseline = 'middle';
-  ssCtx.fillText('SAFE HOUSE', 256, 66);
-  const safeHouseSign = finalizeTexture(shSignCanvas, 1, 1, maxAnisotropy);
-  safeHouseSign.wrapS = THREE.ClampToEdgeWrapping;
-  safeHouseSign.wrapT = THREE.ClampToEdgeWrapping;
-
-  // 25. Taj Mahal Pietra Dura Floral Inlay & Calligraphic Frieze Marble Texture
-  const pdCanvas = document.createElement('canvas');
-  pdCanvas.width = 256;
-  pdCanvas.height = 256;
-  const pdCtx = pdCanvas.getContext('2d')!;
-  pdCtx.fillStyle = '#f3ede2';
-  pdCtx.fillRect(0, 0, 256, 256);
-  // Subtle marble veining
-  pdCtx.strokeStyle = 'rgba(145, 140, 132, 0.16)';
-  pdCtx.lineWidth = 1.5;
-  for (let i = 0; i < 12; i++) {
-    pdCtx.beginPath();
-    pdCtx.moveTo((i * 29) % 256, 0);
-    pdCtx.lineTo(((i * 29) % 256) + 22, 256);
-    pdCtx.stroke();
-  }
-  // Outer dark calligraphic / inlay border frame
-  pdCtx.strokeStyle = '#292524';
-  pdCtx.lineWidth = 6;
-  pdCtx.strokeRect(10, 10, 236, 236);
-  pdCtx.strokeStyle = '#a16207';
-  pdCtx.lineWidth = 2;
-  pdCtx.strokeRect(20, 20, 216, 216);
-  // Repeating Mughal floral lotus & vine motifs (carnelian red + malachite green stems)
-  for (let row = 0; row < 3; row++) {
-    for (let col = 0; col < 4; col++) {
-      const fx = 44 + col * 56;
-      const fy = 52 + row * 74;
-      pdCtx.strokeStyle = '#166534';
-      pdCtx.lineWidth = 2.2;
-      pdCtx.beginPath();
-      pdCtx.moveTo(fx, fy + 24);
-      pdCtx.quadraticCurveTo(fx - 10, fy + 10, fx, fy);
-      pdCtx.moveTo(fx, fy + 18);
-      pdCtx.lineTo(fx - 10, fy + 10);
-      pdCtx.moveTo(fx, fy + 18);
-      pdCtx.lineTo(fx + 10, fy + 10);
-      pdCtx.stroke();
-      // Carnelian flower petals
-      pdCtx.fillStyle = '#b91c1c';
-      pdCtx.beginPath();
-      pdCtx.ellipse(fx, fy - 4, 5, 8, 0, 0, Math.PI * 2);
-      pdCtx.fill();
-      pdCtx.fillStyle = '#0369a1';
-      pdCtx.beginPath();
-      pdCtx.arc(fx - 6, fy, 3, 0, Math.PI * 2);
-      pdCtx.arc(fx + 6, fy, 3, 0, Math.PI * 2);
-      pdCtx.fill();
+  // 7c. Tactical Armored Glove Leather / Cordura Weave
+  const [tgCan, tgCtx] = makeCanvas(128);
+  tgCtx.fillStyle = '#1b1d22';
+  tgCtx.fillRect(0, 0, 128, 128);
+  for (let y = 0; y < 128; y += 6) {
+    for (let x = 0; x < 128; x += 6) {
+      tgCtx.fillStyle = (x + y) % 12 === 0 ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.22)';
+      tgCtx.fillRect(x, y, 4, 4);
     }
   }
-  const pietraDura = finalizeTexture(pdCanvas, 1, 1, maxAnisotropy);
+  tgCtx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
+  tgCtx.lineWidth = 1.5;
+  tgCtx.strokeRect(4, 4, 120, 120);
+  const tacticalGlove = new THREE.CanvasTexture(tgCan);
+  tacticalGlove.wrapS = tacticalGlove.wrapT = THREE.RepeatWrapping;
+  tacticalGlove.colorSpace = THREE.SRGBColorSpace;
+  tacticalGlove.anisotropy = maxAnisotropy;
 
-  // 26. Charbagh Parterre Flowerbed (rich garden soil + pink/white/marigold rose blooms)
-  const fbCanvas = document.createElement('canvas');
-  fbCanvas.width = 256;
-  fbCanvas.height = 256;
-  const fbCtx = fbCanvas.getContext('2d')!;
-  fbCtx.fillStyle = '#2d4720';
-  fbCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 420; i++) {
-    const bx = (i * 53) % 256;
-    const by = (i * 79) % 256;
-    fbCtx.fillStyle = i % 3 === 0 ? '#1f3816' : '#3a5d29';
-    fbCtx.beginPath();
-    fbCtx.arc(bx, by, 5 + (i % 5), 0, Math.PI * 2);
-    fbCtx.fill();
+  // 7d. Brushed Forged Machete / Kukri Steel
+  const [bsCan, bsCtx] = makeCanvas(256);
+  const bsGrad = bsCtx.createLinearGradient(0, 0, 0, 256);
+  bsGrad.addColorStop(0, '#474e59');
+  bsGrad.addColorStop(0.55, '#6d7785');
+  bsGrad.addColorStop(0.86, '#94a3b8');
+  bsGrad.addColorStop(1, '#cbd5e1');
+  bsCtx.fillStyle = bsGrad;
+  bsCtx.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 240; i++) {
+    bsCtx.strokeStyle = i % 2 === 0 ? 'rgba(255,255,255,0.14)' : 'rgba(15,23,42,0.16)';
+    bsCtx.lineWidth = 1;
+    const y = (i * 19) % 256;
+    bsCtx.beginPath();
+    bsCtx.moveTo(0, y);
+    bsCtx.lineTo(256, y + ((i % 5) - 2));
+    bsCtx.stroke();
   }
-  const bloomColors = ['#f472b6', '#fbcfe8', '#ffffff', '#fb7185', '#facc15'];
+  const brushedBladeSteel = new THREE.CanvasTexture(bsCan);
+  brushedBladeSteel.wrapS = brushedBladeSteel.wrapT = THREE.RepeatWrapping;
+  brushedBladeSteel.colorSpace = THREE.SRGBColorSpace;
+  brushedBladeSteel.anisotropy = maxAnisotropy;
+
+  // 7e. Chunky Tactical Digital Wristwatch Dial (glowing cyan LED digits)
+  const [wfCan, wfCtx] = makeCanvas(128);
+  wfCtx.fillStyle = '#090c10';
+  wfCtx.fillRect(0, 0, 128, 128);
+  wfCtx.strokeStyle = '#334155';
+  wfCtx.lineWidth = 8;
+  wfCtx.beginPath();
+  wfCtx.arc(64, 64, 56, 0, Math.PI * 2);
+  wfCtx.stroke();
+  wfCtx.fillStyle = '#0c131d';
+  wfCtx.beginPath();
+  wfCtx.arc(64, 64, 46, 0, Math.PI * 2);
+  wfCtx.fill();
+  // Cyan digital LED digits
+  wfCtx.fillStyle = '#38bdf8';
+  wfCtx.shadowColor = '#0ea5e9';
+  wfCtx.shadowBlur = 10;
+  wfCtx.font = 'bold 26px monospace';
+  wfCtx.textAlign = 'center';
+  wfCtx.textBaseline = 'middle';
+  wfCtx.fillText('18:59', 64, 66);
+  wfCtx.shadowBlur = 0;
+  wfCtx.fillStyle = '#94a3b8';
+  wfCtx.font = 'bold 9px monospace';
+  wfCtx.fillText('SELECT', 64, 30);
+  const watchFace = new THREE.CanvasTexture(wfCan);
+  watchFace.colorSpace = THREE.SRGBColorSpace;
+  watchFace.anisotropy = maxAnisotropy;
+
+  // 7f. Golden-Hour Soft Sun Halo Sprite Texture
+  const [shCan, shCtx] = makeCanvas(256);
+  const shGrad = shCtx.createRadialGradient(128, 128, 4, 128, 128, 126);
+  shGrad.addColorStop(0, 'rgba(255, 250, 220, 0.96)');
+  shGrad.addColorStop(0.18, 'rgba(255, 215, 110, 0.72)');
+  shGrad.addColorStop(0.45, 'rgba(245, 165, 55, 0.34)');
+  shGrad.addColorStop(0.75, 'rgba(218, 125, 32, 0.10)');
+  shGrad.addColorStop(1, 'rgba(218, 125, 32, 0)');
+  shCtx.fillStyle = shGrad;
+  shCtx.fillRect(0, 0, 256, 256);
+  const sunHalo = new THREE.CanvasTexture(shCan);
+  sunHalo.colorSpace = THREE.SRGBColorSpace;
+
+  // 7g. Dusty Tan/Cream Tactical Glove Fabric (matches image_70c3ca82.png)
+  const [tgfCan, tgfCtx] = makeCanvas(128);
+  tgfCtx.fillStyle = '#c8bca2';
+  tgfCtx.fillRect(0, 0, 128, 128);
+  for (let y = 0; y < 128; y += 4) {
+    for (let x = 0; x < 128; x += 4) {
+      tgfCtx.fillStyle = (x + y) % 8 === 0 ? 'rgba(255,255,255,0.16)' : 'rgba(65, 52, 38, 0.16)';
+      tgfCtx.fillRect(x, y, 2, 2);
+    }
+  }
+  for (let i = 0; i < 90; i++) {
+    tgfCtx.fillStyle = 'rgba(78, 56, 36, 0.14)';
+    tgfCtx.beginPath();
+    tgfCtx.arc((i * 43) % 128, (i * 71) % 128, 3 + (i % 6), 0, Math.PI * 2);
+    tgfCtx.fill();
+  }
+  const tanGloveFabric = new THREE.CanvasTexture(tgfCan);
+  tanGloveFabric.wrapS = tanGloveFabric.wrapT = THREE.RepeatWrapping;
+  tanGloveFabric.colorSpace = THREE.SRGBColorSpace;
+  tanGloveFabric.anisotropy = maxAnisotropy;
+
+  // 7h. Brushed Satin Stainless Pistol Slide with Serrations (matches image_70c3ca82.png)
+  const [ssCan, ssCtx] = makeCanvas(256);
+  const ssGrad = ssCtx.createLinearGradient(0, 0, 0, 256);
+  ssGrad.addColorStop(0, '#a6acb3');
+  ssGrad.addColorStop(0.45, '#d1d5db');
+  ssGrad.addColorStop(0.85, '#9ea5ae');
+  ssGrad.addColorStop(1, '#717882');
+  ssCtx.fillStyle = ssGrad;
+  ssCtx.fillRect(0, 0, 256, 256);
   for (let i = 0; i < 160; i++) {
-    const bx = (i * 67 + 13) % 256;
-    const by = (i * 41 + 9) % 256;
-    fbCtx.fillStyle = bloomColors[i % bloomColors.length];
-    fbCtx.beginPath();
-    fbCtx.arc(bx, by, 3 + (i % 3), 0, Math.PI * 2);
-    fbCtx.fill();
+    ssCtx.strokeStyle = i % 2 === 0 ? 'rgba(255,255,255,0.15)' : 'rgba(30,41,59,0.12)';
+    ssCtx.lineWidth = 1;
+    const y = (i * 17) % 256;
+    ssCtx.beginPath();
+    ssCtx.moveTo(0, y);
+    ssCtx.lineTo(256, y);
+    ssCtx.stroke();
   }
-  const charbaghFlowerbed = finalizeTexture(fbCanvas, 2, 10, maxAnisotropy);
+  const brushedSilverSlide = new THREE.CanvasTexture(ssCan);
+  brushedSilverSlide.wrapS = brushedSilverSlide.wrapT = THREE.RepeatWrapping;
+  brushedSilverSlide.colorSpace = THREE.SRGBColorSpace;
+  brushedSilverSlide.anisotropy = maxAnisotropy;
 
-  // 27. Parkour Wall-Run Slatted Timber with Runner Yellow Chevrons
-  const pwCanvas = document.createElement('canvas');
-  pwCanvas.width = 256;
-  pwCanvas.height = 256;
-  const pwCtx = pwCanvas.getContext('2d')!;
-  pwCtx.fillStyle = '#5c3f28';
-  pwCtx.fillRect(0, 0, 256, 256);
-  for (let y = 0; y < 256; y += 32) {
-    pwCtx.fillStyle = y % 64 === 0 ? '#69482e' : '#533823';
-    pwCtx.fillRect(0, y + 2, 256, 28);
+  // 7i. Stippled Matte-Black Polymer Pistol Grip
+  const [pgCan, pgCtx] = makeCanvas(128);
+  pgCtx.fillStyle = '#24272c';
+  pgCtx.fillRect(0, 0, 128, 128);
+  for (let y = 0; y < 128; y += 5) {
+    for (let x = 0; x < 128; x += 5) {
+      pgCtx.fillStyle = (x + y) % 10 === 0 ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.45)';
+      pgCtx.fillRect(x, y, 2, 2);
+    }
   }
-  pwCtx.strokeStyle = 'rgba(250, 204, 21, 0.85)';
-  pwCtx.lineWidth = 10;
-  for (let cx = 42; cx < 230; cx += 64) {
-    pwCtx.beginPath();
-    pwCtx.moveTo(cx - 14, 96);
-    pwCtx.lineTo(cx + 14, 128);
-    pwCtx.lineTo(cx - 14, 160);
-    pwCtx.stroke();
-  }
-  const parkourWallPaint = finalizeTexture(pwCanvas, 2, 1, maxAnisotropy);
+  const polymerGrip = new THREE.CanvasTexture(pgCan);
+  polymerGrip.wrapS = polymerGrip.wrapT = THREE.RepeatWrapping;
+  polymerGrip.colorSpace = THREE.SRGBColorSpace;
+  polymerGrip.anisotropy = maxAnisotropy;
 
-  // 28. Weathered Yellow & Chalk-White Parkour Edge Paint Smudge (Dying Light Sightlines)
-  const smCanvas = document.createElement('canvas');
-  smCanvas.width = 256;
-  smCanvas.height = 64;
-  const smCtx = smCanvas.getContext('2d')!;
-  smCtx.clearRect(0, 0, 256, 64);
-  // Base worn chalk-white undercoat smears
-  for (let i = 0; i < 24; i++) {
-    const sx = (i * 19 + (i % 3) * 7) % 244;
-    const sy = 10 + ((i * 11) % 22);
-    const w = 16 + (i % 5) * 8;
-    const h = 8 + (i % 4) * 5;
-    smCtx.fillStyle = `rgba(241, 245, 249, ${0.42 + (i % 3) * 0.14})`;
-    smCtx.beginPath();
-    smCtx.ellipse(sx + 6, sy + 6, w * 0.55, h * 0.5, ((i % 5) - 2) * 0.08, 0, Math.PI * 2);
-    smCtx.fill();
-  }
-  // Primary weathered yellow parkour brush strokes & handprint/scuff streaks
-  for (let i = 0; i < 32; i++) {
-    const sx = (i * 15 + 4) % 246;
-    const sy = 14 + ((i * 7) % 20);
-    const w = 14 + (i % 4) * 7;
-    const h = 7 + (i % 3) * 4;
-    smCtx.fillStyle = i % 4 === 0 ? 'rgba(250, 204, 21, 0.72)' : 'rgba(234, 179, 8, 0.58)';
-    smCtx.beginPath();
-    smCtx.ellipse(sx + 4, sy + 4, w * 0.5, h * 0.45, ((i % 3) - 1) * 0.1, 0, Math.PI * 2);
-    smCtx.fill();
-  }
-  // Subtle paint drips & chipped gaps for aged realism
-  for (let d = 0; d < 14; d++) {
-    const dx = 10 + ((d * 23) % 236);
-    smCtx.fillStyle = d % 2 === 0 ? 'rgba(234, 179, 8, 0.52)' : 'rgba(241, 245, 249, 0.45)';
-    smCtx.fillRect(dx, 28, 3 + (d % 3), 14 + (d % 16));
-  }
-  const parkourPaintSmudge = finalizeTexture(smCanvas, 1, 1, maxAnisotropy);
-  parkourPaintSmudge.wrapS = THREE.RepeatWrapping;
-  parkourPaintSmudge.wrapT = THREE.ClampToEdgeWrapping;
+  // 8. Radial Contact Shadow
+  const [cCan, cCtx] = makeCanvas(128);
+  const cGrad = cCtx.createRadialGradient(64, 64, 6, 64, 64, 60);
+  cGrad.addColorStop(0, 'rgba(0, 0, 0, 0.58)');
+  cGrad.addColorStop(0.6, 'rgba(0, 0, 0, 0.22)');
+  cGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  cCtx.fillStyle = cGrad;
+  cCtx.fillRect(0, 0, 128, 128);
+  const contactShadow = new THREE.CanvasTexture(cCan);
 
   return {
     marble,
-    sandstone,
-    courtyardTile,
-    woodPlank,
-    rustedMetal,
-    bazaarWall,
-    poolWater,
-    contactShadow,
-    chainLink,
-    blueTarp,
-    jaliLattice,
-    domeRibs,
-    tealWindow,
-    nightHunterMuscle,
-    diamondPlate,
-    skinDetail,
-    charbaghGrass,
-    baseballBatWood,
-    zombieSkin,
-    zombieSkinBump,
-    zombieCloth,
-    dogFurRot,
-    dogFurBump,
-    safeHouseSign,
     pietraDura,
-    charbaghFlowerbed,
-    parkourWallPaint,
-    parkourPaintSmudge,
+    sandstone,
+    courtyardGround,
+    woodPlank,
+    corrugatedMetal,
+    hazardStripe,
+    waterNormal,
+    necroticSkin,
+    tacticalCloth,
+    weatheredHandSkin,
+    tacticalGlove,
+    tanGloveFabric,
+    brushedBladeSteel,
+    brushedSilverSlide,
+    polymerGrip,
+    watchFace,
+    sunHalo,
+    contactShadow,
     dispose: () => {
       marble.dispose();
-      sandstone.dispose();
-      courtyardTile.dispose();
-      woodPlank.dispose();
-      rustedMetal.dispose();
-      bazaarWall.dispose();
-      poolWater.dispose();
-      contactShadow.dispose();
-      chainLink.dispose();
-      blueTarp.dispose();
-      jaliLattice.dispose();
-      domeRibs.dispose();
-      tealWindow.dispose();
-      nightHunterMuscle.dispose();
-      diamondPlate.dispose();
-      skinDetail.dispose();
-      charbaghGrass.dispose();
-      baseballBatWood.dispose();
-      zombieSkin.dispose();
-      zombieSkinBump.dispose();
-      zombieCloth.dispose();
-      dogFurRot.dispose();
-      dogFurBump.dispose();
-      safeHouseSign.dispose();
       pietraDura.dispose();
-      charbaghFlowerbed.dispose();
-      parkourWallPaint.dispose();
-      parkourPaintSmudge.dispose();
+      sandstone.dispose();
+      courtyardGround.dispose();
+      woodPlank.dispose();
+      corrugatedMetal.dispose();
+      hazardStripe.dispose();
+      waterNormal.dispose();
+      necroticSkin.dispose();
+      tacticalCloth.dispose();
+      weatheredHandSkin.dispose();
+      tacticalGlove.dispose();
+      tanGloveFabric.dispose();
+      brushedBladeSteel.dispose();
+      brushedSilverSlide.dispose();
+      polymerGrip.dispose();
+      watchFace.dispose();
+      sunHalo.dispose();
+      contactShadow.dispose();
     },
   };
 }

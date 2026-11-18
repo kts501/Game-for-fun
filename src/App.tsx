@@ -1,64 +1,84 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { AgraNightfallEngine } from './game/engine';
+import { askHavildarVikram } from './game/vikramRadio';
+import type { HudState, RadioMessage } from './game/types';
 import { GameHud } from './components/GameHud';
-import { AgraSurvivalEngine } from './game/engine';
-import type { HudSnapshot, RadioMessage } from './types/game';
 
-const INITIAL_HUD: HudSnapshot = {
-  phase: 'start',
+const INITIAL_HUD: HudState = {
+  phase: 'title',
+  weapon: 'kukri',
+  pistolAmmo: 12,
+  pistolMagSize: 12,
+  pistolReserve: 72,
+  leftHandPose: 'open',
   health: 100,
   maxHealth: 100,
   stamina: 100,
   maxStamina: 100,
-  comboCount: 0,
-  comboTimerRatio: 0,
-  takedownReady: false,
-  timeOfDay: 0,
-  formattedTime: '18:59',
-  isNight: false,
+  combo: 0,
+  maxCombo: 0,
+  score: 0,
+  kills: 0,
+  enemiesAlive: 0,
   cratesCollected: 0,
   totalCrates: 3,
-  crateStatuses: [],
-  tajDistance: 102,
-  flashlightOn: false,
-  firecrackerCooldown: 0,
-  kickCooldown: 0,
-  canMantle: false,
-  activeWeapon: 'bat',
-  timeLabel: 'Golden Dusk',
-  subtitleText: '',
-  subtitleSpeaker: 'OVERWATCH RADIO',
-  interactionPrompt: '',
-  pointerLocked: false,
-  counterIndicators: [],
+  nearCrateLabel: '',
+  unlockProgress: 0,
+  nearWatchtower: false,
+  climbPrompt: '',
+  isClimbing: false,
+  missionObjective: 'Recover GRE Antizin Crates (0/3)',
+  timeOfDayLabel: 'Golden Dusk',
+  cycleProgress: 0,
+  inSafeHouse: false,
+  counterPrompt: false,
+  takedownReady: false,
+  parkourLabel: '',
+  headingDeg: 0,
+  markers: [],
+  vikramLine: '',
   damageFlash: 0,
-  parryFlash: 0,
-  slowMoActive: false,
-  killCount: 0,
-  maxCombo: 0,
-  elapsedSeconds: 0,
-  nearGuardTower: false,
-  radioOpen: false,
+  playerX: 0,
+  playerZ: 22,
+  playerYaw: 0,
+  crates: [
+    { id: 'crate-east', label: 'East Bazaar Rooftop', x: 26, y: 2.8, z: -8, collected: false },
+    { id: 'crate-west', label: 'West Bazaar Rooftop', x: -26, y: 2.8, z: 12, collected: false },
+    { id: 'crate-south', label: 'South Rickshaw Wreckage', x: 12, y: 0, z: 28, collected: false },
+  ],
+  safeHouseX: -14,
+  safeHouseZ: -28,
+  safeHouseRadius: 7.5,
+  watchtowerX: -14,
+  watchtowerZ: -32,
+  threatDots: [],
 };
 
-export default function App() {
-  const mountRef = useRef<HTMLDivElement | null>(null);
-  const engineRef = useRef<AgraSurvivalEngine | null>(null);
-  const hudRef = useRef<HudSnapshot>(INITIAL_HUD);
-  const nextMsgIdRef = useRef(1);
+const INITIAL_RADIO: RadioMessage[] = [
+  {
+    sender: 'vikram',
+    text: 'Havildar Vikram here on watchtower overwatch. My M16 covers 18 meters around the Taj UV gate—report in anytime.',
+  },
+];
 
-  const [hud, setHud] = useState<HudSnapshot>(INITIAL_HUD);
+export function App() {
+  const mountRef = useRef<HTMLDivElement | null>(null);
+  const engineRef = useRef<AgraNightfallEngine | null>(null);
+  const [hud, setHud] = useState<HudState>(INITIAL_HUD);
   const [muted, setMuted] = useState(false);
-  const [radioMessages, setRadioMessages] = useState<RadioMessage[]>([]);
-  const [radioSending, setRadioSending] = useState(false);
+  const [contextError, setContextError] = useState('');
+  const [radioMessages, setRadioMessages] = useState<RadioMessage[]>(INITIAL_RADIO);
+  const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
-    const el = mountRef.current;
-    if (!el) return;
+    const container = mountRef.current;
+    if (!container) return;
 
-    const engine = new AgraSurvivalEngine(el, (snapshot) => {
-      hudRef.current = snapshot;
-      setHud(snapshot);
-    });
+    const engine = new AgraNightfallEngine(
+      container,
+      (nextHud) => setHud(nextHud),
+      (msg) => setContextError(msg),
+    );
     engineRef.current = engine;
 
     return () => {
@@ -67,155 +87,63 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (hud.radioOpen && radioMessages.length === 0) {
-      const remaining = Math.max(0, hud.totalCrates - hud.cratesCollected);
-      const greeting =
-        remaining > 0
-          ? `Havildar Vikram, Taj UV Gate Watchtower. State your status, Runner — ${remaining} Antizin crate${remaining > 1 ? 's are' : ' is'} still missing from the sector.`
-          : 'Havildar Vikram here. All 3 Antizin crates confirmed on scope. Move inside the purple UV archway immediately, I have your six.';
-      setRadioMessages([
+  const handleSendRadio = async (text: string) => {
+    const context = {
+      cratesCollected: hud.cratesCollected,
+      totalCrates: hud.totalCrates,
+      timeOfDayLabel: hud.timeOfDayLabel,
+      health: hud.health,
+      enemiesAlive: hud.enemiesAlive,
+      kills: hud.kills,
+    };
+    setRadioMessages((prev) => [...prev, { sender: 'player', text }]);
+    setIsLoading(true);
+    try {
+      const reply = await askHavildarVikram(text, context);
+      setRadioMessages((prev) => [...prev, { sender: 'vikram', text: reply }]);
+    } catch {
+      setRadioMessages((prev) => [
+        ...prev,
         {
-          id: nextMsgIdRef.current++,
           sender: 'vikram',
-          text: greeting,
+          text: `Static on the line—status shows ${context.cratesCollected}/${context.totalCrates} Antizin crates and ${context.health}% health during ${context.timeOfDayLabel}. Stay sharp near the UV gate.`,
         },
       ]);
+    } finally {
+      setIsLoading(false);
     }
-  }, [hud.radioOpen, hud.cratesCollected, hud.totalCrates, radioMessages.length]);
-
-  const handleStart = useCallback(() => {
-    setRadioMessages([]);
-    setRadioSending(false);
-    engineRef.current?.startGame();
-  }, []);
-
-  const handleRestart = useCallback(() => {
-    setRadioMessages([]);
-    setRadioSending(false);
-    engineRef.current?.restartGame();
-  }, []);
-
-  const handleLockPointer = useCallback(() => {
-    engineRef.current?.lockPointer();
-  }, []);
-
-  const handleSkipTime = useCallback(() => {
-    engineRef.current?.skipTime();
-  }, []);
-
-  const handleToggleMute = useCallback(() => {
-    const engine = engineRef.current;
-    if (!engine) return;
-    const next = !engine.sound.isMuted();
-    engine.sound.setMuted(next);
-    setMuted(next);
-  }, []);
-
-  const handleCloseRadio = useCallback(() => {
-    engineRef.current?.closeRadio();
-  }, []);
-
-  const handleSendRadioMessage = useCallback(
-    async (rawText: string) => {
-      const message = rawText.trim();
-      if (!message || radioSending) return;
-
-      const userMsg: RadioMessage = {
-        id: nextMsgIdRef.current++,
-        sender: 'runner',
-        text: message,
-      };
-      const snapshot = hudRef.current;
-      const historyPayload = radioMessages
-        .filter((m) => m.sender !== 'error')
-        .slice(-8)
-        .map((m) => ({
-          role: m.sender === 'runner' ? ('user' as const) : ('model' as const),
-          text: m.text,
-        }));
-
-      setRadioMessages((prev) => [...prev, userMsg]);
-      setRadioSending(true);
-
-      try {
-        const res = await fetch('/api/guard-radio', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            message,
-            history: historyPayload,
-            gameState: {
-              cratesCollected: snapshot.cratesCollected,
-              totalCrates: snapshot.totalCrates,
-              remainingCrates: snapshot.crateStatuses
-                .filter((c) => !c.collected)
-                .map((c) => ({
-                  label: c.label,
-                  locationHint: c.locationHint,
-                  distance: c.distance,
-                })),
-              health: snapshot.health,
-              maxHealth: snapshot.maxHealth,
-              formattedTime: snapshot.formattedTime,
-              timeLabel: snapshot.timeLabel,
-              isNight: snapshot.isNight,
-              killCount: snapshot.killCount,
-              tajDistance: snapshot.tajDistance,
-            },
-          }),
-        });
-
-        const data = (await res.json()) as { reply?: string; error?: string };
-        if (!res.ok || !data.reply) {
-          throw new Error(data.error || `Radio relay error (${res.status}).`);
-        }
-
-        engineRef.current?.sound.playFlashlightClick();
-        setRadioMessages((prev) => [
-          ...prev,
-          {
-            id: nextMsgIdRef.current++,
-            sender: 'vikram',
-            text: data.reply as string,
-          },
-        ]);
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : 'Unable to reach watchtower radio.';
-        setRadioMessages((prev) => [
-          ...prev,
-          {
-            id: nextMsgIdRef.current++,
-            sender: 'error',
-            text: errMsg,
-          },
-        ]);
-      } finally {
-        setRadioSending(false);
-      }
-    },
-    [radioMessages, radioSending],
-  );
+  };
 
   return (
-    <div className="relative h-screen w-screen overflow-hidden bg-zinc-950">
-      {/* Isolated WebGL mount container */}
+    <main className="relative h-screen w-screen overflow-hidden bg-stone-950">
       <div ref={mountRef} className="h-full w-full" />
 
-      {/* Semantic DOM HUD Overlay */}
+      {contextError && (
+        <div className="fixed inset-x-0 top-16 z-30 mx-auto max-w-md border border-red-500/50 bg-stone-950/90 px-4 py-3 text-center text-xs text-red-300">
+          {contextError}
+        </div>
+      )}
+
       <GameHud
         hud={hud}
         muted={muted}
         radioMessages={radioMessages}
-        radioSending={radioSending}
-        onStart={handleStart}
-        onRestart={handleRestart}
-        onLockPointer={handleLockPointer}
-        onSkipTime={handleSkipTime}
-        onToggleMute={handleToggleMute}
-        onSendRadioMessage={handleSendRadioMessage}
-        onCloseRadio={handleCloseRadio}
+        radioBusy={isLoading}
+        onStart={() => engineRef.current?.startGame()}
+        onResume={() => engineRef.current?.resumeGame()}
+        onRestart={() => {
+          setRadioMessages(INITIAL_RADIO);
+          engineRef.current?.restartGame();
+        }}
+        onToggleMute={() => {
+          if (engineRef.current) {
+            setMuted(engineRef.current.toggleMute());
+          }
+        }}
+        onSendRadio={handleSendRadio}
       />
-    </div>
+    </main>
   );
 }
+
+export default App;

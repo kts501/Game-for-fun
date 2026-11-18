@@ -3,192 +3,197 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import type {
-  BoxCollider,
-  CounterIndicator,
-  DirectionalDamageIndicator,
-  GamePhase,
-  HudSnapshot,
-  LadderVolume,
-  ZiplineRoute,
-} from '../types/game';
-import { SoundEngine } from './audio';
 import { createProceduralTextures, type ProceduralTextureSet } from './textures';
-import { WeaponAndEffects } from './viewmodel';
-import { buildAgraWorld, type WorldBuildResult } from './world';
-import { ZombieManager, type ZombieActor } from './zombies';
+import { ProceduralAudio } from './audio';
+import {
+  buildEnemyActor,
+  buildFirstPersonRig,
+  createSharedEntityAssets,
+  HUMANOID_VARIANTS,
+  type EnemyActor,
+  type SharedEntityAssets,
+} from './entities';
+import { buildTajCourtyardWorld, type WorldHandles } from './world';
+import type {
+  ClimbableZone,
+  CompassMarker,
+  EnemyKind,
+  GamePhase,
+  HandPose,
+  HudState,
+  WeaponKind,
+} from './types';
 
-// Pre-allocated math helpers (zero GC inside animation loop)
+// Pre-allocated scratch math helpers (zero per-frame GC)
+const _v1 = new THREE.Vector3();
+const _v2 = new THREE.Vector3();
 const _forward = new THREE.Vector3();
 const _right = new THREE.Vector3();
-const _moveDir = new THREE.Vector3();
-const _projVec = new THREE.Vector3();
-const _sunDir = new THREE.Vector3();
-const _tmpVecA = new THREE.Vector3();
-const _tmpVecB = new THREE.Vector3();
-const _skyTopDay = new THREE.Color(0x6d829c);
-const _skyHorizDay = new THREE.Color(0xdfa05d); // Warm golden Agra sunset horizon without blowing bloom threshold
-const _skyTopTwilight = new THREE.Color(0x281e45);
-const _skyHorizTwilight = new THREE.Color(0x7c3454);
-const _skyTopNight = new THREE.Color(0x050814);
-const _skyHorizNight = new THREE.Color(0x16213d);
-const _skyFogCurrent = new THREE.Color();
-const _sunColorDay = new THREE.Color(0xffc985);
-const _sunColorMoon = new THREE.Color(0x9cb8f2);
-const _hemiSkyDay = new THREE.Color(0xffdba8);
-const _hemiSkyNight = new THREE.Color(0x304570);
-const _hemiGroundDay = new THREE.Color(0x523b2e);
-const _hemiGroundNight = new THREE.Color(0x111520);
+const _up = new THREE.Vector3(0, 1, 0);
+const _cSkyDusk = new THREE.Color(0xc29248);
+const _cSkyNight = new THREE.Color(0x090e1b);
+const _cFogDusk = new THREE.Color(0xc89548);
+const _cFogNight = new THREE.Color(0x0a1020);
+const _cKeyDusk = new THREE.Color(0xffc66d);
+const _cKeyNight = new THREE.Color(0xc2d8ff);
+const _cHemiSkyDusk = new THREE.Color(0xffcf7a);
+const _cHemiSkyNight = new THREE.Color(0x5b7db8);
+const _cLerp = new THREE.Color();
+const _sunDirDusk = new THREE.Vector3(-0.62, 0.25, -0.74).normalize();
 
-const FULL_CYCLE_SECONDS = 120; // 2 minutes per full 24h cycle
-const PLAYER_EYE_HEIGHT = 1.68;
-const PLAYER_RADIUS = 0.4;
+const VIKRAM_CALLOUTS = {
+  intro: 'Havildar Vikram: "Dusk is falling over Agra. Grab all 3 GRE Antizin crates before Nightfall—watch the rooftops!"',
+  safehouse: 'Havildar Vikram: "Inside the Taj UV Gate. Catch your breath—my M16 covers the perimeter."',
+  crateOne: 'Havildar Vikram: "One Antizin crate secured! Two left—use the wooden ramps to reach the bazaar roofs."',
+  crateTwo: 'Havildar Vikram: "Two down, one left! Watch for Hazmat Guards with red tanks—they blow sky high."',
+  allCrates: 'Havildar Vikram: "All 3 Antizin crates recovered! Bring them back to the Taj UV Safe House Gate!"',
+  takedown: 'Havildar Vikram: "Massive shockwave! That 5x takedown cleared the whole pack."',
+};
 
-export class AgraSurvivalEngine {
-  private readonly mountEl: HTMLElement;
-  private readonly onHudUpdate: (hud: HudSnapshot) => void;
+interface ActiveVfxRing {
+  mesh: THREE.Mesh;
+  age: number;
+  maxAge: number;
+  maxScale: number;
+}
 
-  private readonly renderer: THREE.WebGLRenderer;
-  private readonly composer: EffectComposer | null = null;
-  private readonly bloomPass: UnrealBloomPass | null = null;
-  private readonly scene: THREE.Scene;
-  private readonly camera: THREE.PerspectiveCamera;
-  private readonly isSoftwareGl: boolean;
-  private readonly textures: ProceduralTextureSet;
-  private readonly world: WorldBuildResult;
-  private readonly viewmodel: WeaponAndEffects;
-  private readonly zombies: ZombieManager;
-  public readonly sound = new SoundEngine();
+interface ActiveTracer {
+  line: THREE.Line;
+  age: number;
+}
 
-  // SkyDome Shader & Lighting rig
-  private readonly skyMesh: THREE.Mesh;
-  private readonly skyMat: THREE.ShaderMaterial;
-  private readonly sunLight: THREE.DirectionalLight;
-  private readonly hemiLight: THREE.HemisphereLight;
-  private readonly flashlight: THREE.SpotLight;
-  private readonly flashlightTarget = new THREE.Object3D();
+function detectSoftwareWebGL(): boolean {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl2');
+    if (!gl) return true;
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
+    const gpu = String(gl.getParameter(param) ?? '');
+    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
+  } catch {
+    return true;
+  }
+}
 
-  // Loop & lifecycle
+export class AgraNightfallEngine {
+  private container: HTMLElement;
+  private onHudUpdate: (hud: HudState) => void;
+  private onContextError: (msg: string) => void;
+
+  private isSoftwareGl: boolean;
+  private renderer: THREE.WebGLRenderer;
+  private scene: THREE.Scene;
+  private camera: THREE.PerspectiveCamera;
+  private composer: EffectComposer | null = null;
+  private bloomPass: UnrealBloomPass | null = null;
+
+  private hemiLight: THREE.HemisphereLight;
+  private keyLight: THREE.DirectionalLight;
+  private skyDome: THREE.Mesh;
+  private skyMat: THREE.ShaderMaterial;
+  private sunSprite: THREE.Sprite;
+
+  private textures: ProceduralTextureSet;
+  private audio: ProceduralAudio;
+  private entityAssets: SharedEntityAssets;
+  private world: WorldHandles;
+
+  private fpRig: THREE.Group;
+  private rightArm: THREE.Group;
+  private leftArm: THREE.Group;
+  private leftHandPivot: THREE.Group;
+  private rightHandPivot: THREE.Group;
+  private dropkickLeg: THREE.Group;
+  private pistolMuzzleFlash: THREE.Mesh;
+  private setRigWeapon: (w: WeaponKind) => void;
+  private updateHandPoses: (leftPose: HandPose, rightPose: HandPose, dt: number, slideKick: number) => void;
+  private disposeFpRig: () => void;
+
+  private enemies: EnemyActor[] = [];
+  private nextEnemyId = 1;
+  private vfxRings: ActiveVfxRing[] = [];
+  private tracers: ActiveTracer[] = [];
+  private vfxRingGeo: THREE.RingGeometry;
+
+  // Game & Player State
+  private phase: GamePhase = 'title';
+  private weapon: WeaponKind = 'kukri';
+  private playerPos = new THREE.Vector3(0, 0, 22);
+  private playerVel = new THREE.Vector3();
+  private yaw = 0;
+  private pitch = 0.03;
+  private grounded = true;
+  private eyeHeight = 1.72;
+  private currentEyeHeight = 1.72;
+
+  private health = 100;
+  private maxHealth = 100;
+  private stamina = 100;
+  private maxStamina = 100;
+  private combo = 0;
+  private maxCombo = 0;
+  private comboDecayTimer = 0;
+  private score = 0;
+  private kills = 0;
+
+  // Day/Night & Mission State
+  private cycleTime = 0; // 0 = Golden Dusk, progresses smoothly toward 1 = Nightfall
+  private spawnTimer = 0;
+  private vikramFireTimer = 1.2;
+  private vikramFlashTimer = 0;
+  private unlockHoldTimer = 0;
+
+  // Parkour, Pistol & Articulated Hand Action Timers
+  private slideTimer = 0;
+  private vaultTimer = 0;
+  private vaultTarget = new THREE.Vector3();
+  private dropkickTimer = 0;
+  private swingTimer = 0;
+  private counterAnimTimer = 0;
+  private leftJabTimer = 0;
+  private gesturePose: HandPose = 'open';
+  private gestureTimer = 0;
+  private pistolAmmo = 12;
+  private pistolMagSize = 12;
+  private pistolReserve = 72;
+  private pistolFireTimer = 0;
+  private pistolReloadTimer = 0;
+  private pistolFlashTimer = 0;
+  private slideKick = 0;
+  private aimingDownSights = false;
+  private takedownTimer = 0;
+  private lungeTimer = 0;
+  private lungeDir = new THREE.Vector3();
+  private activeClimb: ClimbableZone | null = null;
+  private climbSoundCooldown = 0;
+  private parkourLabel = '';
+  private parkourLabelTimer = 0;
+  private vikramLine = VIKRAM_CALLOUTS.intro;
+  private vikramTimer = 7.5;
+  private wasInSafeHouse = false;
+  private damageFlash = 0;
+  private bobPhase = 0;
+
+  // Input State
+  private keys = new Set<string>();
+  private pointerLocked = false;
   private frameId = 0;
   private disposed = false;
-  private lastNow = performance.now();
-  private elapsed = 0;
-  private hudThrottle = 0;
+  private clock = new THREE.Clock();
+  private hudAccumulator = 0;
 
-  // Game & Player state
-  private phase: GamePhase = 'start';
-  private pointerLocked = false;
-  private readonly playerPos = new THREE.Vector3(5.8, 0, 24.5);
-  private readonly playerVel = new THREE.Vector3();
-  private yaw = 0.11;
-  private pitch = -0.04;
-  private onGround = true;
-  private coyoteTimer = 0;
-  private jumpBufferTimer = 0;
-  private canMantle = false;
-
-  // Mantle, Speed Vault & Lunge kinematics
-  private mantling = false;
-  private mantleTimer = 0;
-  private readonly mantleStart = new THREE.Vector3();
-  private readonly mantleEnd = new THREE.Vector3();
-
-  private vaulting = false;
-  private vaultTimer = 0;
-  private readonly vaultStart = new THREE.Vector3();
-  private readonly vaultEnd = new THREE.Vector3();
-  private vaultPeakY = 0;
-
-  private lungeTimer = 0;
-  private readonly lungeVel = new THREE.Vector3();
-  private targetYawGoal: number | null = null;
-
-  // Parkour Slide, Wall-Run, Safety Roll, Momentum Flow & Zipline state
-  private slideTimer = 0;
-  private slideCooldown = 0;
-  private slideDustTimer = 0;
-  private readonly slideDir = new THREE.Vector3();
-  private wallRunTimer = 0;
-  private wallRunCooldown = 0;
-  private wallRunSide: -1 | 0 | 1 = 0;
-  private readonly wallRunNormal = new THREE.Vector3();
-  private readonly wallRunTangent = new THREE.Vector3();
-  private wallRunStepTimer = 0;
-  private wallRunStepCount = 0;
-  private lastWallColliderId = '';
-  private rollBufferTimer = 0;
-  private rollTimer = 0;
-  private readonly rollDir = new THREE.Vector3();
-  private rollPitchOffset = 0;
-  private parkourFlow = 0;
-  private flowDecayTimer = 0;
-  private parkourMoveLabel = '';
-  private parkourMoveTimer = 0;
-  private eyeHeightOffset = 0;
-  private landingDipOffset = 0;
-  private sprintWindTimer = 0;
-  private activeZipline: ZiplineRoute | null = null;
-  private ziplineReverse = false;
-  private ziplineT = 0;
-  private activeLadder: LadderVolume | null = null;
-  private ladderStepTimer = 0;
-  private radioOpen = false;
-
-  // Player stats, combat & camera feedback
-  private health = 100;
-  private readonly maxHealth = 100;
-  private stamina = 100;
-  private readonly maxStamina = 100;
-  private staminaPauseTimer = 0;
-  private comboCount = 0;
-  private maxCombo = 0;
-  private comboTimer = 0;
-  private killCount = 0;
-  private attackCooldown = 0;
-  private kickCooldown = 0;
-  private dropkickTimer = 0;
-  private mantlePitchOffset = 0;
-  private mantleRollOffset = 0;
-  private slowMoTimer = 0;
-  private hitstopTimer = 0;
-  private cameraShake = 0;
-  private damageFlash = 0;
-  private parryFlash = 0;
-  private preVaultSpeed = 0;
-  private preMantleSpeed = 0;
-  private directionalHits: DirectionalDamageIndicator[] = [];
-  private nextHitId = 1;
-
-  // Gadgets & Day/Night
-  private flashlightOn = false;
-  private firecrackerCooldown = 0;
-  private timeOfDay = 0.0; // Starts at 17:15 warm golden sunset
-  private wasNight = false;
-  private nightSubtitleShown = false;
-
-  // Story & Subtitles
-  private subtitleSpeaker = 'OVERWATCH RADIO';
-  private subtitleText = '';
-  private subtitleTimer = 0;
-  private playTimeSeconds = 0;
-
-  private readonly keys: Record<string, boolean> = {};
-
-  constructor(mountEl: HTMLElement, onHudUpdate: (hud: HudSnapshot) => void) {
-    this.mountEl = mountEl;
+  constructor(
+    container: HTMLElement,
+    onHudUpdate: (hud: HudState) => void,
+    onContextError: (msg: string) => void,
+  ) {
+    this.container = container;
     this.onHudUpdate = onHudUpdate;
+    this.onContextError = onContextError;
 
-    // 1. Software WebGL detection
-    this.isSoftwareGl = (() => {
-      const gl = document.createElement('canvas').getContext('webgl2');
-      if (!gl) return true;
-      const ext = gl.getExtension('WEBGL_debug_renderer_info');
-      const param = ext ? ext.UNMASKED_RENDERER_WEBGL : gl.RENDERER;
-      const gpu = String(gl.getParameter(param));
-      gl.getExtension('WEBGL_lose_context')?.loseContext();
-      return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
-    })();
+    this.isSoftwareGl = detectSoftwareWebGL();
 
     this.renderer = new THREE.WebGLRenderer({
       antialias: !this.isSoftwareGl,
@@ -196,1774 +201,963 @@ export class AgraSurvivalEngine {
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.94;
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.5));
-    this.renderer.setSize(mountEl.clientWidth || window.innerWidth, mountEl.clientHeight || window.innerHeight);
+    this.renderer.toneMappingExposure = 1.12;
+    this.renderer.setPixelRatio(
+      this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 1.5),
+    );
+    this.renderer.setSize(
+      container.clientWidth || window.innerWidth,
+      container.clientHeight || window.innerHeight,
+    );
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.domElement.style.display = 'block';
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
-    mountEl.appendChild(this.renderer.domElement);
+    container.appendChild(this.renderer.domElement);
 
-    // 2. Scene, Camera, SkyDome Shader, RoomEnvironment IBL & Horizon Fog
     this.scene = new THREE.Scene();
-    this.scene.background = _skyHorizDay.clone();
-    this.scene.fog = new THREE.FogExp2(_skyHorizDay.getHex(), 0.0095);
+    this.scene.background = _cSkyDusk.clone();
+    this.scene.fog = new THREE.FogExp2(_cFogDusk.getHex(), 0.0085);
 
+    this.camera = new THREE.PerspectiveCamera(
+      76,
+      (container.clientWidth || window.innerWidth) /
+        Math.max(1, container.clientHeight || window.innerHeight),
+      0.1,
+      340,
+    );
+    this.scene.add(this.camera);
+
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.48;
+    pmrem.dispose();
+
+    // Golden-Hour Hazy Sky & Moonlit Night Lighting Rig (no purple world fog)
+    this.hemiLight = new THREE.HemisphereLight(0xffcf7a, 0x2b241c, 1.05);
+    this.scene.add(this.hemiLight);
+
+    this.keyLight = new THREE.DirectionalLight(0xffc66d, 2.45);
+    this.keyLight.position.set(-62, 25, -42);
+    this.keyLight.castShadow = !this.isSoftwareGl;
+    this.keyLight.shadow.mapSize.set(1024, 1024);
+    this.keyLight.shadow.camera.left = -52;
+    this.keyLight.shadow.camera.right = 52;
+    this.keyLight.shadow.camera.top = 52;
+    this.keyLight.shadow.camera.bottom = -52;
+    this.keyLight.shadow.bias = -0.0005;
+    this.keyLight.shadow.normalBias = 0.02;
+    this.scene.add(this.keyLight);
+
+    const rimLight = new THREE.DirectionalLight(0xf59e0b, 0.42);
+    rimLight.position.set(34, 22, 36);
+    this.scene.add(rimLight);
+
+    const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    this.textures = createProceduralTextures(maxAniso);
+
+    // Procedural Golden-Hour Hazy Sky Dome transitioning smoothly to Nightfall
     this.skyMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      depthWrite: false,
+      fog: false,
       uniforms: {
-        topColor: { value: _skyTopDay.clone() },
-        horizonColor: { value: _skyHorizDay.clone() },
-        sunDir: { value: new THREE.Vector3(0.3, 0.25, -0.9).normalize() },
-        sunColor: { value: new THREE.Color(0xffdfa0) },
-        sunIntensity: { value: 0.85 },
+        uNightT: { value: 0 },
+        uSunDir: { value: _sunDirDusk.clone() },
       },
       vertexShader: `
-        varying vec3 vWorldDir;
+        varying vec3 vLocalDir;
         void main() {
-          vWorldDir = normalize(position);
+          vLocalDir = normalize(position);
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
       fragmentShader: `
-        uniform vec3 topColor;
-        uniform vec3 horizonColor;
-        uniform vec3 sunDir;
-        uniform vec3 sunColor;
-        uniform float sunIntensity;
-        varying vec3 vWorldDir;
+        uniform float uNightT;
+        uniform vec3 uSunDir;
+        varying vec3 vLocalDir;
         void main() {
-          vec3 dir = normalize(vWorldDir);
-          float h = clamp(dir.y, 0.0, 1.0);
-          vec3 sky = mix(horizonColor, topColor, pow(h, 0.55));
-          float sunDot = max(dot(dir, normalize(sunDir)), 0.0);
-          float halo = pow(sunDot, 12.0) * 0.28 * sunIntensity;
-          float disc = smoothstep(0.9965, 0.9988, sunDot) * 0.85 * sunIntensity;
-          sky += sunColor * (halo + disc);
-          gl_FragColor = vec4(sky, 1.0);
+          vec3 dir = normalize(vLocalDir);
+          float h = clamp(dir.y, -0.15, 1.0);
+          float sunDot = max(dot(dir, normalize(uSunDir)), 0.0);
+
+          // Golden-hour hazy gradient (warm amber horizon -> dusty ochre-slate zenith)
+          vec3 duskHorizon = vec3(0.84, 0.62, 0.28);
+          vec3 duskMid = vec3(0.73, 0.56, 0.34);
+          vec3 duskZenith = vec3(0.45, 0.41, 0.35);
+          vec3 duskCol = mix(duskHorizon, duskMid, smoothstep(-0.02, 0.26, h));
+          duskCol = mix(duskCol, duskZenith, smoothstep(0.24, 0.85, h));
+
+          // Intense soft golden sun bloom scatter in upper-left sky
+          float sunHalo = pow(sunDot, 5.0) * 0.46 + pow(sunDot, 36.0) * 0.55;
+          duskCol += vec3(1.0, 0.84, 0.44) * sunHalo;
+
+          // Moonlit indigo Nightfall gradient
+          vec3 nightHorizon = vec3(0.055, 0.085, 0.16);
+          vec3 nightZenith = vec3(0.022, 0.036, 0.075);
+          vec3 nightCol = mix(nightHorizon, nightZenith, smoothstep(0.0, 0.72, h));
+
+          vec3 finalCol = mix(duskCol, nightCol, uNightT);
+          gl_FragColor = vec4(finalCol, 1.0);
         }
       `,
-      side: THREE.BackSide,
+    });
+    this.skyDome = new THREE.Mesh(new THREE.SphereGeometry(260, 24, 16), this.skyMat);
+    this.skyDome.renderOrder = -10;
+    this.scene.add(this.skyDome);
+
+    // Soft additive Golden Sun Halo Sprite in upper-left sky
+    const sunSpriteMat = new THREE.SpriteMaterial({
+      map: this.textures.sunHalo,
+      color: 0xffdf88,
+      transparent: true,
+      opacity: 0.92,
+      blending: THREE.AdditiveBlending,
       depthWrite: false,
       fog: false,
     });
-    this.skyMesh = new THREE.Mesh(new THREE.SphereGeometry(210, 24, 16), this.skyMat);
-    this.scene.add(this.skyMesh);
+    this.sunSprite = new THREE.Sprite(sunSpriteMat);
+    this.sunSprite.scale.set(115, 115, 1);
+    this.sunSprite.position.copy(_sunDirDusk).multiplyScalar(210);
+    this.scene.add(this.sunSprite);
 
-    const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
-    this.scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
-    this.scene.environmentIntensity = 0.32;
-    pmremGenerator.dispose();
+    this.audio = new ProceduralAudio();
+    this.entityAssets = createSharedEntityAssets(this.textures);
+    this.world = buildTajCourtyardWorld(this.scene, this.textures, this.isSoftwareGl);
+    this.vfxRingGeo = new THREE.RingGeometry(0.6, 1.0, 32);
 
-    this.camera = new THREE.PerspectiveCamera(
-      76,
-      (mountEl.clientWidth || window.innerWidth) / (mountEl.clientHeight || window.innerHeight),
-      0.1,
-      260,
-    );
-    this.camera.layers.enable(1); // Render Layer 1 instanced grass tufts while Reflector skips them
-    this.scene.add(this.camera);
-
-    // 3. Three-point / Outdoor Day-Night Lighting + Player Flashlight
-    this.hemiLight = new THREE.HemisphereLight(_hemiSkyDay.getHex(), _hemiGroundDay.getHex(), 0.58);
-    this.scene.add(this.hemiLight);
-
-    this.sunLight = new THREE.DirectionalLight(_sunColorDay.getHex(), 1.45);
-    this.sunLight.position.set(28, 22, -65);
-    this.sunLight.castShadow = !this.isSoftwareGl;
-    this.sunLight.shadow.mapSize.set(1024, 1024);
-    this.sunLight.shadow.camera.near = 5;
-    this.sunLight.shadow.camera.far = 190;
-    const d = 64;
-    this.sunLight.shadow.camera.left = -d;
-    this.sunLight.shadow.camera.right = d;
-    this.sunLight.shadow.camera.top = d;
-    this.sunLight.shadow.camera.bottom = -d;
-    this.sunLight.shadow.bias = -0.0005;
-    this.sunLight.shadow.normalBias = 0.02;
-    this.scene.add(this.sunLight);
-
-    this.flashlight = new THREE.SpotLight(0xfef9c3, 0, 42, Math.PI / 4.2, 0.55, 1.55);
-    this.flashlight.castShadow = false;
-    this.flashlight.position.set(0.18, -0.08, 0);
-    this.flashlightTarget.position.set(0, 0, -12);
-    this.camera.add(this.flashlight);
-    this.camera.add(this.flashlightTarget);
-    this.flashlight.target = this.flashlightTarget;
-
-    // 4. Build World, Textures, Viewmodel, and Zombies
-    this.textures = createProceduralTextures(this.renderer.capabilities.getMaxAnisotropy());
-    this.world = buildAgraWorld(this.scene, this.textures, this.isSoftwareGl);
-    this.viewmodel = new WeaponAndEffects(this.scene, this.camera, this.textures);
-    this.zombies = new ZombieManager(this.scene, this.textures);
+    const fp = buildFirstPersonRig(this.textures);
+    this.fpRig = fp.rig;
+    this.rightArm = fp.rightArmGroup;
+    this.leftArm = fp.leftArmGroup;
+    this.leftHandPivot = fp.leftHandPivot;
+    this.rightHandPivot = fp.rightHandPivot;
+    this.dropkickLeg = fp.dropkickLeg;
+    this.pistolMuzzleFlash = fp.pistolMuzzleFlash;
+    this.setRigWeapon = fp.setWeapon;
+    this.updateHandPoses = fp.updateHandPoses;
+    this.disposeFpRig = fp.dispose;
+    this.camera.add(this.fpRig);
+    this.fpRig.visible = false;
 
     if (!this.isSoftwareGl) {
-      const w = mountEl.clientWidth || window.innerWidth;
-      const h = mountEl.clientHeight || window.innerHeight;
+      const w = container.clientWidth || window.innerWidth;
+      const h = container.clientHeight || window.innerHeight;
       this.composer = new EffectComposer(this.renderer);
-      this.composer.setPixelRatio(this.renderer.getPixelRatio());
-      this.composer.setSize(w, h);
       this.composer.addPass(new RenderPass(this.scene, this.camera));
       this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.35, 0.4, 0.85);
       this.composer.addPass(this.bloomPass);
-      this.composer.addPass(new OutputPass());
+    }
+
+    this.spawnCourtyardInfected(10);
+
+    if (!this.isSoftwareGl) {
       this.renderer.compile(this.scene, this.camera);
     }
 
     this.bindEvents();
-    this.syncCameraToPlayer(0);
-    this.updateAtmosphere(0);
-    this.emitHud();
+    this.pushHudState();
     this.startLoop();
   }
 
-  public startGame(): void {
-    this.sound.unlock();
-    this.resetState();
+  public startGame() {
+    if (this.phase === 'gameover' || this.phase === 'victory') {
+      this.resetRun();
+    }
     this.phase = 'playing';
-    this.setSubtitle(
-      'OVERWATCH RADIO',
-      'Runner, the Agra quarantine zone is collapsing. Scavenge 3 Antizin supply crates from the bazaar and return to the Taj Mahal UV gate before nightfall.',
-      11,
-    );
-    this.syncCameraToPlayer(0);
-    this.lockPointer();
-    this.emitHud();
+    this.fpRig.visible = true;
+    this.requestLock();
+    this.pushHudState();
   }
 
-  public restartGame(): void {
-    this.startGame();
+  public resumeGame() {
+    if (this.phase === 'paused' || this.phase === 'radio') {
+      this.phase = 'playing';
+      this.fpRig.visible = true;
+      this.requestLock();
+      this.pushHudState();
+    }
   }
 
-  public lockPointer(): void {
-    this.sound.unlock();
-    if (document.pointerLockElement !== this.renderer.domElement) {
+  public restartGame() {
+    this.resetRun();
+    this.phase = 'playing';
+    this.fpRig.visible = true;
+    this.requestLock();
+    this.pushHudState();
+  }
+
+  public toggleMute(): boolean {
+    const next = !this.audio.isMuted();
+    this.audio.setMuted(next);
+    return next;
+  }
+
+  public getWeapon(): WeaponKind {
+    return this.weapon;
+  }
+
+  private requestLock() {
+    const el = this.renderer.domElement;
+    if (document.pointerLockElement !== el && el.requestPointerLock) {
       try {
-        this.renderer.domElement.requestPointerLock();
+        const res = el.requestPointerLock() as unknown as Promise<void> | undefined;
+        if (res && typeof res.catch === 'function') {
+          res.catch(() => {
+            // Ignore in sandboxed/headless environments
+          });
+        }
       } catch {
-        // Ignore if browser rejects outside gesture
+        // Ignore in sandboxed/headless environments
       }
     }
   }
 
-  public skipTime(): void {
-    this.timeOfDay = (this.timeOfDay + 0.19) % 1;
-    this.updateAtmosphere(0);
-    this.emitHud();
-  }
-
-  public isNearGuardTower(): boolean {
-    return (
-      Math.hypot(
-        this.playerPos.x - this.world.guardTowerCenter.x,
-        this.playerPos.z - this.world.guardTowerCenter.z,
-      ) <= 5.2
-    );
-  }
-
-  public openRadio(): void {
-    if (this.phase !== 'playing' || this.radioOpen) return;
-    this.radioOpen = true;
-    for (const k of Object.keys(this.keys)) {
-      this.keys[k] = false;
-    }
-    if (document.pointerLockElement) {
-      document.exitPointerLock();
-    }
-    this.sound.playFlashlightClick();
-    this.emitHud();
-  }
-
-  public closeRadio(): void {
-    if (!this.radioOpen) return;
-    this.radioOpen = false;
-    this.sound.playFlashlightClick();
-    this.lockPointer();
-    this.emitHud();
-  }
-
-  private resetState(): void {
-    this.playerPos.set(5.8, 0, 24.5);
-    this.playerVel.set(0, 0, 0);
-    this.yaw = 0.11;
-    this.pitch = -0.04;
-    this.onGround = true;
-    this.coyoteTimer = 0;
-    this.jumpBufferTimer = 0;
-    this.canMantle = false;
-    this.mantling = false;
-    this.vaulting = false;
-    this.vaultTimer = 0;
-    this.lungeTimer = 0;
-    this.targetYawGoal = null;
-    this.slideTimer = 0;
-    this.slideCooldown = 0;
-    this.slideDustTimer = 0;
-    this.wallRunTimer = 0;
-    this.wallRunCooldown = 0;
-    this.wallRunSide = 0;
-    this.wallRunStepTimer = 0;
-    this.wallRunStepCount = 0;
-    this.lastWallColliderId = '';
-    this.rollBufferTimer = 0;
-    this.rollTimer = 0;
-    this.rollPitchOffset = 0;
-    this.parkourFlow = 0;
-    this.flowDecayTimer = 0;
-    this.parkourMoveLabel = '';
-    this.parkourMoveTimer = 0;
-    this.eyeHeightOffset = 0;
-    this.landingDipOffset = 0;
-    this.sprintWindTimer = 0;
-    this.activeZipline = null;
-    this.ziplineT = 0;
-    this.activeLadder = null;
-    this.ladderStepTimer = 0;
-    this.radioOpen = false;
-
-    this.health = this.maxHealth;
-    this.stamina = this.maxStamina;
-    this.comboCount = 0;
-    this.maxCombo = 0;
-    this.comboTimer = 0;
-    this.killCount = 0;
-    this.attackCooldown = 0;
-    this.kickCooldown = 0;
-    this.dropkickTimer = 0;
-    this.mantlePitchOffset = 0;
-    this.mantleRollOffset = 0;
-    this.slowMoTimer = 0;
-    this.hitstopTimer = 0;
-    this.cameraShake = 0;
-    this.damageFlash = 0;
-    this.parryFlash = 0;
-    this.preVaultSpeed = 0;
-    this.preMantleSpeed = 0;
-    this.directionalHits = [];
-    this.firecrackerCooldown = 0;
-    this.flashlightOn = false;
-    this.flashlight.intensity = 0;
-
-    this.timeOfDay = 0.0;
-    this.wasNight = false;
-    this.nightSubtitleShown = false;
-    this.playTimeSeconds = 0;
+  private resetRun() {
+    this.enemies.forEach((e) => this.scene.remove(e.root));
+    this.enemies = [];
 
     this.world.crates.forEach((c) => {
-      c.collected = false;
-      c.group.visible = true;
+      c.state.collected = false;
+      c.beaconMat.color.setHex(0x22d3ee);
+      c.beaconRing.visible = true;
     });
 
-    this.zombies.resetAll();
+    this.playerPos.set(0, 0, 22);
+    this.playerVel.set(0, 0, 0);
+    this.yaw = 0;
+    this.pitch = 0.03;
+    this.grounded = true;
+    this.health = this.maxHealth;
+    this.stamina = this.maxStamina;
+    this.combo = 0;
+    this.maxCombo = 0;
+    this.score = 0;
+    this.kills = 0;
+    this.cycleTime = 0;
+    this.unlockHoldTimer = 0;
+    this.slideTimer = 0;
+    this.vaultTimer = 0;
+    this.activeClimb = null;
+    this.dropkickTimer = 0;
+    this.takedownTimer = 0;
+    this.leftJabTimer = 0;
+    this.gesturePose = 'open';
+    this.gestureTimer = 0;
+    this.pistolAmmo = this.pistolMagSize;
+    this.pistolReserve = 72;
+    this.pistolFireTimer = 0;
+    this.pistolReloadTimer = 0;
+    this.pistolFlashTimer = 0;
+    this.pistolMuzzleFlash.visible = false;
+    this.slideKick = 0;
+    this.aimingDownSights = false;
+    this.damageFlash = 0;
+    this.vikramLine = VIKRAM_CALLOUTS.intro;
+    this.vikramTimer = 7.5;
+
+    this.spawnCourtyardInfected(10);
   }
 
-  private setSubtitle(speaker: string, text: string, duration = 7.5): void {
-    this.subtitleSpeaker = speaker;
-    this.subtitleText = text;
-    this.subtitleTimer = duration;
+  private spawnCourtyardInfected(count: number) {
+    const roster: EnemyKind[] = [
+      'agra_biter',
+      'viral_runner',
+      'hazmat_guard',
+      'riot_brute',
+      'hound',
+      ...HUMANOID_VARIANTS.map((v) => v.id),
+    ];
+
+    for (let i = 0; i < count; i++) {
+      const kind = roster[(this.nextEnemyId + i) % roster.length];
+      const actor = buildEnemyActor(this.nextEnemyId++, kind, this.entityAssets);
+
+      const angle = ((this.nextEnemyId * 1.7 + i) % 12) * ((Math.PI * 2) / 12);
+      const dist = 16 + (i % 4) * 7;
+      let sx = Math.cos(angle) * dist;
+      let sz = Math.sin(angle) * dist + 4;
+
+      // Keep clear of Taj UV Safe House perimeter
+      const dxSh = sx - this.world.safeHouseCenter.x;
+      const dzSh = sz - this.world.safeHouseCenter.z;
+      const dSh = Math.hypot(dxSh, dzSh);
+      if (dSh < this.world.safeHouseRadius + 4) {
+        sx = this.world.safeHouseCenter.x + (dxSh / Math.max(0.1, dSh)) * (this.world.safeHouseRadius + 6);
+        sz = this.world.safeHouseCenter.z + (dzSh / Math.max(0.1, dSh)) * (this.world.safeHouseRadius + 6);
+      }
+
+      actor.root.position.set(
+        THREE.MathUtils.clamp(sx, -46, 46),
+        0,
+        THREE.MathUtils.clamp(sz, -34, 48),
+      );
+      this.scene.add(actor.root);
+      this.enemies.push(actor);
+    }
   }
 
-  private bindEvents(): void {
-    window.addEventListener('resize', this.onResize);
-    window.addEventListener('keydown', this.onKeyDown);
-    window.addEventListener('keyup', this.onKeyUp);
-    document.addEventListener('pointerlockchange', this.onPointerLockChange);
-    document.addEventListener('mousemove', this.onMouseMove);
-    this.renderer.domElement.addEventListener('mousedown', this.onMouseDown);
-    this.renderer.domElement.addEventListener('contextmenu', this.onContextMenu);
-    this.renderer.domElement.addEventListener('webglcontextlost', this.onContextLost);
+  private setVikramCallout(line: string, duration = 6.0) {
+    this.vikramLine = line;
+    this.vikramTimer = duration;
   }
 
-  private unbindEvents(): void {
-    window.removeEventListener('resize', this.onResize);
-    window.removeEventListener('keydown', this.onKeyDown);
-    window.removeEventListener('keyup', this.onKeyUp);
-    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
-    document.removeEventListener('mousemove', this.onMouseMove);
-    this.renderer.domElement.removeEventListener('mousedown', this.onMouseDown);
-    this.renderer.domElement.removeEventListener('contextmenu', this.onContextMenu);
-    this.renderer.domElement.removeEventListener('webglcontextlost', this.onContextLost);
+  private setParkourLabel(label: string) {
+    this.parkourLabel = label;
+    this.parkourLabelTimer = 1.05;
   }
 
-  private onContextLost = (e: Event) => {
+  private spawnShockwaveRing(pos: THREE.Vector3, colorHex: number, maxScale: number) {
+    const mat = new THREE.MeshBasicMaterial({
+      color: colorHex,
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(this.vfxRingGeo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(pos.x, pos.y + 0.2, pos.z);
+    this.scene.add(mesh);
+    this.vfxRings.push({ mesh, age: 0, maxAge: 0.45, maxScale });
+  }
+
+  private spawnBulletTracer(from: THREE.Vector3, to: THREE.Vector3) {
+    const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
+    const mat = new THREE.LineBasicMaterial({ color: 0xfef08a, transparent: true, opacity: 0.9 });
+    const line = new THREE.Line(geo, mat);
+    this.scene.add(line);
+    this.tracers.push({ line, age: 0 });
+  }
+
+  private bindEvents() {
+    window.addEventListener('resize', this.handleResize);
+    window.addEventListener('keydown', this.handleKeyDown);
+    window.addEventListener('keyup', this.handleKeyUp);
+    window.addEventListener('mousemove', this.handleMouseMove);
+    window.addEventListener('mousedown', this.handleMouseDown);
+    window.addEventListener('mouseup', this.handleMouseUp);
+    window.addEventListener('wheel', this.handleWheel, { passive: true });
+    window.addEventListener('contextmenu', this.handleContextMenu);
+    document.addEventListener('pointerlockchange', this.handlePointerLockChange);
+    this.renderer.domElement.addEventListener('webglcontextlost', this.handleContextLost);
+    this.renderer.domElement.addEventListener('webglcontextrestored', this.handleContextRestored);
+  }
+
+  private handleContextLost = (e: Event) => {
     e.preventDefault();
+    this.onContextError('WebGL rendering context interrupted. Recovering...');
   };
 
-  private onContextMenu = (e: MouseEvent) => {
-    e.preventDefault();
+  private handleContextRestored = () => {
+    this.onContextError('');
   };
 
-  private onResize = () => {
-    const w = this.mountEl.clientWidth || window.innerWidth;
-    const h = this.mountEl.clientHeight || window.innerHeight;
+  private handleResize = () => {
+    if (this.disposed) return;
+    const w = this.container.clientWidth || window.innerWidth;
+    const h = Math.max(1, this.container.clientHeight || window.innerHeight);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.5));
     this.renderer.setSize(w, h);
-    if (this.composer && this.bloomPass) {
-      this.composer.setPixelRatio(this.renderer.getPixelRatio());
-      this.composer.setSize(w, h);
-      this.bloomPass.setSize(w, h);
+    if (this.composer) this.composer.setSize(w, h);
+    if (this.bloomPass) this.bloomPass.resolution.set(w, h);
+  };
+
+  private handlePointerLockChange = () => {
+    const locked = document.pointerLockElement === this.renderer.domElement;
+    this.pointerLocked = locked;
+    if (!locked && this.phase === 'playing') {
+      this.phase = 'paused';
+      this.keys.clear();
+      this.pushHudState();
     }
   };
 
-  private onPointerLockChange = () => {
-    this.pointerLocked = document.pointerLockElement === this.renderer.domElement;
-    this.emitHud();
+  private handleMouseMove = (e: MouseEvent) => {
+    if (this.phase !== 'playing') return;
+    if (!this.pointerLocked && e.buttons !== 1) return;
+    const sens = 0.0022;
+    this.yaw -= e.movementX * sens;
+    this.pitch = THREE.MathUtils.clamp(this.pitch - e.movementY * sens, -1.35, 1.35);
   };
 
-  private onMouseMove = (e: MouseEvent) => {
-    if (!this.pointerLocked || this.phase !== 'playing') return;
-    const sensitivity = 0.0022;
-    this.yaw -= e.movementX * sensitivity;
-    this.pitch = THREE.MathUtils.clamp(this.pitch - e.movementY * sensitivity, -1.42, 1.42);
+  private handleContextMenu = (e: MouseEvent) => {
+    if (this.phase === 'playing') {
+      e.preventDefault();
+    }
   };
 
-  private onMouseDown = (e: MouseEvent) => {
-    if (this.phase !== 'playing' || this.radioOpen) return;
-    this.sound.unlock();
+  private handleMouseDown = (e: MouseEvent) => {
+    if (this.phase !== 'playing') return;
     if (!this.pointerLocked) {
-      this.lockPointer();
-      return;
+      this.requestLock();
     }
-
     if (e.button === 0) {
-      this.performMeleeAttack();
+      if (!this.grounded && this.dropkickTimer <= 0 && this.stamina >= 18) {
+        this.triggerDropkick();
+      } else if (this.weapon === 'pistol') {
+        this.triggerPistolShot();
+      } else {
+        this.triggerMeleeStrike();
+      }
     } else if (e.button === 2) {
-      this.performCounterParry();
+      const hasAttacker = this.enemies.some(
+        (en) => !en.dead && en.windupTimer > 0 && en.root.position.distanceTo(this.playerPos) < 4.6,
+      );
+      if (hasAttacker || this.weapon !== 'pistol') {
+        this.triggerCounter();
+      } else {
+        this.aimingDownSights = true;
+      }
     }
   };
 
-  private onKeyDown = (e: KeyboardEvent) => {
-    if (this.radioOpen) {
-      if (e.code === 'Escape' && !e.repeat) {
-        e.preventDefault();
-        this.closeRadio();
-      }
-      return;
+  private handleMouseUp = (e: MouseEvent) => {
+    if (e.button === 2) {
+      this.aimingDownSights = false;
     }
-    this.keys[e.code] = true;
-    if (this.phase === 'start') {
-      const ignored = [
-        'Escape',
-        'Tab',
-        'ShiftLeft',
-        'ShiftRight',
-        'ControlLeft',
-        'ControlRight',
-        'AltLeft',
-        'AltRight',
-        'MetaLeft',
-        'MetaRight',
-      ];
-      if (!e.repeat && !ignored.includes(e.code)) {
-        e.preventDefault();
-        this.startGame();
-      }
+  };
+
+  private handleWheel = (e: WheelEvent) => {
+    if (this.phase !== 'playing') return;
+    const order: WeaponKind[] = ['kukri', 'pipe', 'pistol'];
+    const idx = order.indexOf(this.weapon);
+    const next = order[(idx + (e.deltaY > 0 ? 1 : order.length - 1)) % order.length];
+    this.switchWeapon(next);
+  };
+
+  private switchWeapon(next: WeaponKind) {
+    if (this.weapon === next) return;
+    this.weapon = next;
+    this.aimingDownSights = false;
+    this.pistolReloadTimer = 0;
+    this.setRigWeapon(next);
+    const label =
+      next === 'kukri' ? 'EQUIP: SERRATED KUKRI' : next === 'pipe' ? 'EQUIP: IRON PIPE' : 'EQUIP: TACTICAL PISTOL';
+    this.setParkourLabel(label);
+    this.pushHudState();
+  }
+
+  private handleKeyDown = (e: KeyboardEvent) => {
+    if (this.phase === 'radio' && e.code === 'Escape') {
+      e.preventDefault();
+      this.resumeGame();
       return;
     }
     if (this.phase !== 'playing') return;
+    const code = e.code;
+    this.keys.add(code);
 
-    if (e.code === 'Space') {
+    if (code === 'Digit1') {
+      this.switchWeapon('kukri');
+    } else if (code === 'Digit2') {
+      this.switchWeapon('pipe');
+    } else if (code === 'Digit3') {
+      this.switchWeapon('pistol');
+    } else if (code === 'Space') {
       e.preventDefault();
-      if (!e.repeat) {
-        if (this.activeZipline) {
-          this.activeZipline = null;
-          this.playerVel.x = -Math.sin(this.yaw) * 11.8;
-          this.playerVel.z = -Math.cos(this.yaw) * 11.8;
-          this.playerVel.y = 8.4;
-          this.onGround = false;
-          this.triggerFlowBoost('ZIPLINE LAUNCH', 0.35);
-          this.sound.playWindRush(0.75);
-          return;
-        }
-        if (this.wallRunSide !== 0) {
-          this.performWallKick();
-          return;
-        }
-        if (this.slideTimer > 0) {
-          this.slideTimer = 0;
-          const speed = 13.4 + this.parkourFlow * 1.4;
-          this.playerVel.x = -Math.sin(this.yaw) * speed;
-          this.playerVel.z = -Math.cos(this.yaw) * speed;
-          this.playerVel.y = 9.2;
-          this.onGround = false;
-          this.coyoteTimer = 0;
-          this.jumpBufferTimer = 0;
-          this.triggerFlowBoost('SLIDE-HOP', 0.38);
-          this.sound.playWindRush(0.85);
-          return;
-        }
-        this.jumpBufferTimer = 0.16;
-        this.tryJumpOrMantle();
+      this.tryJumpVaultOrMantle();
+    } else if (code === 'KeyC' || code === 'ControlLeft') {
+      this.trySlide();
+    } else if (code === 'KeyF') {
+      this.triggerDropkick();
+    } else if (code === 'KeyV') {
+      this.triggerLeftFistJab();
+    } else if (code === 'KeyG') {
+      this.cycleHandGesture();
+    } else if (code === 'KeyE') {
+      if (this.activeClimb) {
+        this.activeClimb = null;
+        this.setParkourLabel('DISMOUNT');
+        this.pushHudState();
+        return;
       }
-    } else if (e.code === 'KeyF' && !e.repeat) {
-      this.toggleFlashlight();
-    } else if (e.code === 'KeyQ' && !e.repeat) {
-      this.throwFirecracker();
-    } else if (e.code === 'KeyE' && !e.repeat) {
-      this.tryInteract();
-    } else if (e.code === 'KeyR' && !e.repeat) {
-      this.performHeavyTakedown();
-    } else if (e.code === 'KeyC' && !e.repeat) {
-      if (!this.onGround && !this.mantling && !this.vaulting && !this.activeZipline) {
-        this.rollBufferTimer = 0.32;
-        if (this.playerVel.y > -8.5) {
-          this.performParkourKick();
-        }
-      } else {
-        const horizSpeed = Math.hypot(this.playerVel.x, this.playerVel.z);
-        const wantsSprint = Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
-        if (this.onGround && wantsSprint && horizSpeed > 6.4) {
-          this.tryParkourSlide();
-        } else {
-          this.performParkourKick();
-        }
+      // Priority: 1. Watchtower Radio if close, 2. Interactable Climbable, 3. Counter
+      const nearCrate = this.getNearestUncollectedCrate(3.4);
+      const nearTower = this.isNearWatchtower();
+      const nearClimb = this.getNearestClimbable();
+      if (!nearCrate && nearTower) {
+        this.openVikramRadio();
+      } else if (!nearCrate && nearClimb) {
+        this.activeClimb = nearClimb;
+        this.playerVel.set(0, 0, 0);
+        this.playerPos.y = Math.max(this.playerPos.y, nearClimb.yMin + 0.15);
+        this.audio.playParkour();
+        this.setParkourLabel(`CLIMBING · ${nearClimb.label.toUpperCase()}`);
+        this.pushHudState();
+      } else if (!nearCrate) {
+        this.triggerCounter();
       }
-    } else if (e.code === 'KeyV' && !e.repeat) {
-      this.performParkourKick();
-    } else if ((e.code === 'ControlLeft' || e.code === 'KeyX') && !e.repeat) {
-      if (!this.onGround) {
-        this.rollBufferTimer = 0.34;
-      } else {
-        this.tryParkourSlide();
+    } else if (code === 'KeyR') {
+      if (this.combo >= 5) {
+        this.triggerHeavyTakedown();
+      } else if (this.weapon === 'pistol') {
+        this.startPistolReload();
       }
-    } else if (e.code === 'Digit1' && !e.repeat) {
-      this.viewmodel.setWeapon('bat');
-      this.emitHud();
-    } else if (e.code === 'Digit2' && !e.repeat) {
-      this.viewmodel.setWeapon('machete');
-      this.emitHud();
-    } else if (e.code === 'Digit3' && !e.repeat) {
-      this.viewmodel.setWeapon('pipe');
-      this.emitHud();
-    } else if (e.code === 'KeyT' && !e.repeat) {
-      this.skipTime();
     }
   };
 
-  private onKeyUp = (e: KeyboardEvent) => {
-    this.keys[e.code] = false;
+  private handleKeyUp = (e: KeyboardEvent) => {
+    this.keys.delete(e.code);
+    if (e.code === 'KeyE') {
+      this.unlockHoldTimer = 0;
+    }
   };
 
-  private toggleFlashlight(): void {
-    this.flashlightOn = !this.flashlightOn;
-    this.flashlight.intensity = this.flashlightOn ? 6.5 : 0;
-    this.sound.playFlashlightClick();
-    this.emitHud();
+  private openVikramRadio() {
+    this.phase = 'radio';
+    this.keys.clear();
+    if (document.pointerLockElement === this.renderer.domElement) {
+      document.exitPointerLock();
+    }
+    this.pushHudState();
   }
 
-  private throwFirecracker(): void {
-    if (this.firecrackerCooldown > 0) return;
-    this.firecrackerCooldown = 3.2;
-
-    _tmpVecA.set(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
-    _tmpVecB.copy(this.camera.position).addScaledVector(_tmpVecA, 0.7);
-    this.viewmodel.throwFirecracker(_tmpVecB, _tmpVecA);
-    this.sound.playFirecrackerFuse();
-  }
-
-  private findNearbyZipline(): { route: ZiplineRoute; reverse: boolean } | null {
-    for (let i = 0; i < this.world.ziplines.length; i++) {
-      const z = this.world.ziplines[i];
-      if (this.playerPos.distanceTo(z.start) < 3.0) {
-        return { route: z, reverse: false };
-      }
-      if (this.playerPos.distanceTo(z.end) < 3.0) {
-        return { route: z, reverse: true };
-      }
+  private getNearestUncollectedCrate(maxDist: number) {
+    for (const c of this.world.crates) {
+      if (c.state.collected) continue;
+      const d = Math.hypot(c.state.x - this.playerPos.x, c.state.z - this.playerPos.z);
+      const dy = Math.abs(c.state.y - this.playerPos.y);
+      if (d <= maxDist && dy <= 2.2) return c;
     }
     return null;
   }
 
-  private tryInteract(): void {
-    for (let i = 0; i < this.world.crates.length; i++) {
-      const c = this.world.crates[i];
-      if (c.collected) continue;
-      if (this.playerPos.distanceTo(c.position) < 3.6) {
-        c.collected = true;
-        c.group.visible = false;
-        this.sound.playScavenge();
+  private getNearestClimbable(): ClimbableZone | null {
+    let best: ClimbableZone | null = null;
+    let bestDist = Infinity;
+    for (const c of this.world.climbables) {
+      const d = Math.hypot(c.x - this.playerPos.x, c.z - this.playerPos.z);
+      if (
+        d <= c.radius &&
+        this.playerPos.y >= c.yMin - 0.9 &&
+        this.playerPos.y <= c.yMax + 0.5 &&
+        d < bestDist
+      ) {
+        bestDist = d;
+        best = c;
+      }
+    }
+    return best;
+  }
 
-        const collectedCount = this.world.crates.filter((cr) => cr.collected).length;
-        if (collectedCount === 1) {
-          this.setSubtitle(
-            'OVERWATCH RADIO',
-            'First Antizin crate secured! Two left — watch the alleys, armored Brutes guard the heavy caches.',
-            7.5,
-          );
-        } else if (collectedCount === 2) {
-          this.setSubtitle(
-            'OVERWATCH RADIO',
-            'Two Antizin crates recovered! One remaining. Use rooftop ziplines if Night Hunters chase!',
-            7.5,
-          );
-        } else if (collectedCount === 3) {
-          this.setSubtitle(
-            'OVERWATCH RADIO',
-            'All 3 Antizin crates secured! Zip or sprint north to the Taj Mahal UV Safe House gate now!',
-            9.5,
-          );
-        }
-        this.emitHud();
+  private isNearWatchtower(): boolean {
+    const d = Math.hypot(
+      this.world.watchtowerPos.x - this.playerPos.x,
+      this.world.watchtowerPos.z - this.playerPos.z,
+    );
+    return d <= 9.5;
+  }
+
+  private getForwardVector(out: THREE.Vector3): THREE.Vector3 {
+    out.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
+    return out;
+  }
+
+  private tryJumpVaultOrMantle() {
+    if (this.activeClimb) {
+      const c = this.activeClimb;
+      if (this.playerPos.y >= c.yMax - 1.6) {
+        this.vaultTimer = 0.28;
+        this.vaultTarget.set(c.exitX, c.yMax, c.exitZ);
+        this.activeClimb = null;
+        this.audio.playParkour();
+        this.setParkourLabel('SUMMIT MANTLE');
+      } else {
+        this.activeClimb = null;
+        this.playerVel.y = 6.8;
+        this.grounded = false;
+        this.audio.playParkour();
+        this.setParkourLabel('LADDER LEAP');
+      }
+      return;
+    }
+    if (this.vaultTimer > 0) return;
+
+    this.getForwardVector(_forward);
+    const probeX = this.playerPos.x + _forward.x * 1.45;
+    const probeZ = this.playerPos.z + _forward.z * 1.45;
+
+    for (const obs of this.world.obstacles) {
+      const withinX = Math.abs(probeX - obs.x) <= obs.halfW + 0.65;
+      const withinZ = Math.abs(probeZ - obs.z) <= obs.halfD + 0.65;
+      if (!withinX || !withinZ) continue;
+
+      if (obs.vaultable && this.playerPos.y < obs.height + 0.4) {
+        this.vaultTimer = 0.32;
+        this.vaultTarget.set(
+          this.playerPos.x + _forward.x * 2.5,
+          0,
+          this.playerPos.z + _forward.z * 2.5,
+        );
+        this.audio.playParkour();
+        this.setParkourLabel('VAULT');
+        return;
+      }
+
+      if (obs.mantleable && this.playerPos.y >= obs.height - 2.3 && this.playerPos.y < obs.height) {
+        this.vaultTimer = 0.36;
+        this.vaultTarget.set(
+          THREE.MathUtils.clamp(probeX, obs.x - obs.halfW + 0.5, obs.x + obs.halfW - 0.5),
+          obs.height,
+          THREE.MathUtils.clamp(probeZ, obs.z - obs.halfD + 0.5, obs.z + obs.halfD - 0.5),
+        );
+        this.audio.playParkour();
+        this.setParkourLabel('LEDGE MANTLE');
         return;
       }
     }
 
-    if (this.isNearGuardTower()) {
-      this.openRadio();
-      return;
-    }
-
-    const zipHit = this.findNearbyZipline();
-    if (zipHit && !this.activeZipline) {
-      this.activeZipline = zipHit.route;
-      this.ziplineReverse = zipHit.reverse;
-      this.ziplineT = 0;
-      this.slideTimer = 0;
-      this.mantling = false;
-      this.sound.playMantle();
+    if (this.grounded) {
+      this.playerVel.y = 7.4;
+      this.grounded = false;
+      this.audio.playParkour();
     }
   }
 
-  private tryParkourSlide(): void {
-    if (
-      !this.onGround ||
-      this.mantling ||
-      this.vaulting ||
-      this.activeZipline ||
-      this.slideTimer > 0 ||
-      this.slideCooldown > 0
-    ) {
-      return;
-    }
-    const speed = Math.hypot(this.playerVel.x, this.playerVel.z);
-    if (speed < 4.5) return;
+  private trySlide() {
+    if (!this.grounded || this.slideTimer > 0 || this.stamina < 14) return;
+    const moving =
+      this.keys.has('KeyW') || this.keys.has('KeyA') || this.keys.has('KeyS') || this.keys.has('KeyD');
+    if (!moving) return;
 
-    this.slideTimer = 0.54;
-    this.slideCooldown = 0.85;
-    this.slideDustTimer = 0.08;
-    this.slideDir.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
-    this.viewmodel.spawnDustPuffs(this.playerPos, 6);
-    this.sound.playSlideScrape();
-    this.sound.playWindRush(0.6);
+    this.stamina = Math.max(0, this.stamina - 14);
+    this.slideTimer = 0.52;
+    this.audio.playParkour();
+    this.setParkourLabel('SLIDE');
   }
 
-  // =========================================================================
-  // ARKHAM-STYLE FREEFLOW COMBAT: STRIKE + LUNGE, COUNTER, KICK, TAKEDOWN
-  // =========================================================================
-  private performMeleeAttack(): void {
-    if (this.attackCooldown > 0 || this.mantling) return;
-    this.attackCooldown = 0.34;
-    this.viewmodel.triggerSwing();
-    this.sound.playPipeSwing();
+  private triggerDropkick() {
+    if (this.dropkickTimer > 0 || this.stamina < 18) return;
+    this.stamina = Math.max(0, this.stamina - 18);
+    this.dropkickTimer = 0.48;
+    if (this.grounded) {
+      this.playerVel.y = 4.6;
+      this.grounded = false;
+    }
+    this.getForwardVector(_forward);
+    this.lungeTimer = 0.25;
+    this.lungeDir.copy(_forward).multiplyScalar(14);
+    this.audio.playSwing();
+    this.setParkourLabel('DROPKICK');
 
-    const lookX = -Math.sin(this.yaw);
-    const lookZ = -Math.cos(this.yaw);
-    let bestTarget: ZombieActor | null = null;
+    const target = this.findNearestTarget(3.6, 0.35);
+    if (target) {
+      this.applyDamageToEnemy(target, 48, 12, true);
+    }
+  }
+
+  private findNearestTarget(maxDist: number, minDot: number): EnemyActor | null {
+    this.getForwardVector(_forward);
+    let best: EnemyActor | null = null;
     let bestScore = Infinity;
 
-    for (const z of this.zombies.zombies) {
-      if (z.state === 'dead') continue;
-      const dx = z.pos.x - this.playerPos.x;
-      const dz = z.pos.z - this.playerPos.z;
-      const dy = Math.abs(z.pos.y - this.playerPos.y);
-      const dist = Math.hypot(dx, dz);
-      if (dist > 4.6 || dy > 2.2) continue;
-
-      const dot = (dx * lookX + dz * lookZ) / (dist || 1);
-      if (dot > 0.25) {
-        const score = dist - dot * 1.4;
-        if (score < bestScore) {
-          bestScore = score;
-          bestTarget = z;
-        }
+    for (const enemy of this.enemies) {
+      if (enemy.dead) continue;
+      _v1.subVectors(enemy.root.position, this.playerPos);
+      _v1.y = 0;
+      const dist = _v1.length();
+      if (dist > maxDist || dist < 0.01) continue;
+      _v1.divideScalar(dist);
+      const dot = _v1.dot(_forward);
+      if (dot < minDot) continue;
+      const weighted = dist - dot * 1.4;
+      if (weighted < bestScore) {
+        bestScore = weighted;
+        best = enemy;
       }
     }
+    return best;
+  }
 
-    if (bestTarget) {
-      const dx = bestTarget.pos.x - this.playerPos.x;
-      const dz = bestTarget.pos.z - this.playerPos.z;
-      const dist = Math.hypot(dx, dz) || 1;
-      const nx = dx / dist;
-      const nz = dz / dist;
+  private triggerMeleeStrike() {
+    const cooldown = this.weapon === 'kukri' ? 0.3 : 0.38;
+    if (this.swingTimer > 0 || this.takedownTimer > 0) return;
+    this.swingTimer = cooldown;
+    this.audio.playSwing();
 
-      this.targetYawGoal = Math.atan2(-nx, -nz);
-      if (dist > 1.65) {
-        this.lungeTimer = 0.14;
-        this.lungeVel.set(nx * 14, 0, nz * 14);
+    const target = this.findNearestTarget(4.8, 0.45);
+    if (target) {
+      _v1.subVectors(target.root.position, this.playerPos);
+      _v1.y = 0;
+      const dist = _v1.length();
+      if (dist > 1.35) {
+        _v1.divideScalar(dist);
+        this.lungeTimer = 0.16;
+        this.lungeDir.copy(_v1).multiplyScalar(Math.min(13, (dist - 1.1) * 7.5));
       }
-
-      const bruteToPlayerX = -nx;
-      const bruteToPlayerZ = -nz;
-      const bruteForwardX = Math.sin(bestTarget.yaw);
-      const bruteForwardZ = Math.cos(bestTarget.yaw);
-      const facingPlayer = bruteToPlayerX * bruteForwardX + bruteToPlayerZ * bruteForwardZ;
-      const lureActive = this.viewmodel.getActiveLurePosition() !== null;
-
-      if (bestTarget.kind === 'brute' && bestTarget.state !== 'stunned' && facingPlayer > 0.2 && !lureActive) {
-        this.viewmodel.triggerBlocked();
-        this.sound.playPipeHit(false, true);
-        this.cameraShake = 0.22;
-        _tmpVecA.copy(bestTarget.pos).setY(bestTarget.pos.y + 1.3);
-        this.viewmodel.spawnSparks(_tmpVecA, 0x94a3b8, 12);
-        this.setSubtitle(
-          'COMBAT TIP',
-          'Brute blocked frontal strike! Counter [Right-Click], Kick [C], or lure with Firecracker [Q]!',
-          4.2,
-        );
-        return;
-      }
-
-      const damage = 32 + Math.min(20, this.comboCount * 3);
-      _tmpVecB.set(nx, 0, nz);
-      const killed = this.zombies.damageZombie(bestTarget, damage, _tmpVecB, 5.4, 0.45);
-      if (killed) this.killCount++;
-
-      this.hitstopTimer = 0.04;
-      this.cameraShake = 0.18;
-      this.registerComboHit(1);
-      this.sound.playPipeHit(false, false);
-      const sparkY = bestTarget.kind === 'dog' ? 0.65 : 1.35;
-      _tmpVecA.copy(bestTarget.pos).setY(bestTarget.pos.y + sparkY);
-      this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, 11);
+      const baseDmg = this.weapon === 'kukri' ? 35 : 30;
+      const kb = this.weapon === 'pipe' ? 7.0 : 4.2;
+      this.applyDamageToEnemy(target, baseDmg + Math.min(24, this.combo * 3), kb, this.weapon === 'pipe');
     }
   }
 
-  private performParkourKick(): void {
-    if (this.kickCooldown > 0 || this.mantling) return;
-    const airborne = !this.onGround;
-    this.kickCooldown = airborne ? 1.05 : 0.85;
-    this.viewmodel.triggerKick(airborne);
-
-    const lookX = -Math.sin(this.yaw);
-    const lookZ = -Math.cos(this.yaw);
-
-    if (airborne) {
-      // Flying Dropkick forward kinetic boost!
-      this.dropkickTimer = 0.36;
-      this.playerVel.x += lookX * 5.5;
-      this.playerVel.z += lookZ * 5.5;
-      this.playerVel.y = Math.max(this.playerVel.y, 1.8);
-    }
-
-    const reach = airborne ? 4.2 : 3.6;
-    const damage = airborne ? 38 : 24;
-    const knockForce = airborne ? 15.5 : 12.5;
-    const stunDur = airborne ? 1.7 : 1.35;
-    let kickedAny = false;
-
-    for (const z of this.zombies.zombies) {
-      if (z.state === 'dead') continue;
-      const dx = z.pos.x - this.playerPos.x;
-      const dz = z.pos.z - this.playerPos.z;
-      const dist = Math.hypot(dx, dz);
-      if (dist > reach || Math.abs(z.pos.y - this.playerPos.y) > 2.4) continue;
-
-      const dot = (dx * lookX + dz * lookZ) / (dist || 1);
-      if (dot > 0.32) {
-        kickedAny = true;
-        const nx = dx / (dist || 1);
-        const nz = dz / (dist || 1);
-        _tmpVecB.set(nx, 0, nz);
-        const killed = this.zombies.damageZombie(z, damage, _tmpVecB, knockForce, stunDur);
-        if (killed) this.killCount++;
-        const sparkY = z.kind === 'dog' ? 0.6 : 1.1;
-        _tmpVecA.copy(z.pos).setY(z.pos.y + sparkY);
-        this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, airborne ? 10 : 7);
+  private triggerCounter() {
+    if (this.counterAnimTimer > 0) return;
+    let attacker: EnemyActor | null = null;
+    let bestDist = 4.6;
+    for (const enemy of this.enemies) {
+      if (enemy.dead || enemy.windupTimer <= 0) continue;
+      const d = enemy.root.position.distanceTo(this.playerPos);
+      if (d < bestDist) {
+        bestDist = d;
+        attacker = enemy;
       }
     }
 
-    this.sound.playKick(kickedAny);
-    if (kickedAny) {
-      this.hitstopTimer = airborne ? 0.055 : 0.04;
-      this.cameraShake = airborne ? 0.3 : 0.22;
-      this.registerComboHit(1);
-    }
-  }
+    this.counterAnimTimer = 0.34;
+    if (attacker) {
+      attacker.windupTimer = 0;
+      attacker.counterIcon.visible = false;
+      attacker.staggerTimer = 1.6;
+      this.audio.playCounter();
+      this.setParkourLabel('COUNTER PARRY');
+      this.applyDamageToEnemy(attacker, 46, 8.0, true);
 
-  private performCounterParry(): void {
-    if (this.mantling) return;
-    let counteredAny = false;
-
-    for (const z of this.zombies.zombies) {
-      if (z.state !== 'windup') continue;
-      const dx = z.pos.x - this.playerPos.x;
-      const dz = z.pos.z - this.playerPos.z;
-      const dist = Math.hypot(dx, dz);
-      if (dist <= 5.5 && Math.abs(z.pos.y - this.playerPos.y) < 2.5) {
-        counteredAny = true;
-        const nx = dx / (dist || 1);
-        const nz = dz / (dist || 1);
-        this.targetYawGoal = Math.atan2(-nx, -nz);
-
-        _tmpVecB.set(nx, 0, nz);
-        const killed = this.zombies.damageZombie(z, 52, _tmpVecB, 12.5, 1.85);
-        if (killed) this.killCount++;
-
-        const sparkY = z.kind === 'dog' ? 0.72 : 1.4;
-        _tmpVecA.copy(z.pos).setY(z.pos.y + sparkY);
-        this.viewmodel.spawnSparks(_tmpVecA, 0xfef08a, 14);
-        this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, 10);
-        this.registerComboHit(2);
-      }
-    }
-
-    this.viewmodel.triggerParry();
-    if (counteredAny) {
-      this.parryFlash = 0.48;
-      this.hitstopTimer = 0.045;
-      this.cameraShake = 0.24;
-      this.sound.playCounterClang();
-      this.attackCooldown = 0.14;
-    } else {
-      this.sound.playPipeSwing();
-      this.attackCooldown = 0.22;
-    }
-  }
-
-  private performHeavyTakedown(): void {
-    if (this.comboCount < 5 || this.mantling) return;
-
-    this.comboCount = 0;
-    this.comboTimer = 0;
-    this.slowMoTimer = 0.38;
-    this.cameraShake = 0.4;
-    this.parryFlash = 0.5;
-    this.viewmodel.triggerTakedown(this.playerPos);
-    this.sound.playHeavyTakedown();
-
-    for (const z of this.zombies.zombies) {
-      if (z.state === 'dead') continue;
-      const dx = z.pos.x - this.playerPos.x;
-      const dz = z.pos.z - this.playerPos.z;
-      const dist = Math.hypot(dx, dz);
-      if (dist <= 7.0 && Math.abs(z.pos.y - this.playerPos.y) < 3.0) {
-        const nx = dx / (dist || 1);
-        const nz = dz / (dist || 1);
-        _tmpVecB.set(nx, 0, nz);
-        const killed = this.zombies.damageZombie(z, 95, _tmpVecB, 13.5, 2.2);
-        if (killed) this.killCount++;
-        const sparkY = z.kind === 'dog' ? 0.65 : 1.2;
-        _tmpVecA.copy(z.pos).setY(z.pos.y + sparkY);
-        this.viewmodel.spawnBloodAndSparks(_tmpVecA, _tmpVecB, 12);
-      }
-    }
-    this.emitHud();
-  }
-
-  private registerComboHit(amount = 1): void {
-    this.comboCount += amount;
-    if (this.comboCount > this.maxCombo) this.maxCombo = this.comboCount;
-    this.comboTimer = 4.8;
-    this.sound.playComboChime(this.comboCount);
-  }
-
-  // =========================================================================
-  // FIXED PARKOUR JUMPING, COYOTE TIME & STRICT UPWARD LEDGE MANTLING
-  // =========================================================================
-  private getColliderTopAt(b: BoxCollider, x: number, z: number): number {
-    if (!b.ramp) return b.maxY;
-    const coord = b.ramp.axis === 'x' ? x : z;
-    const span = b.ramp.highCoord - b.ramp.lowCoord;
-    const t = span !== 0 ? THREE.MathUtils.clamp((coord - b.ramp.lowCoord) / span, 0, 1) : 1;
-    return THREE.MathUtils.lerp(b.ramp.lowY, b.ramp.highY, t);
-  }
-
-  private triggerFlowBoost(label: string, amount = 0.36): void {
-    this.parkourFlow = Math.min(1, this.parkourFlow + amount);
-    this.flowDecayTimer = 2.8;
-    this.parkourMoveLabel = label;
-    this.parkourMoveTimer = 1.35;
-  }
-
-  private performWallKick(): void {
-    const fwdX = -Math.sin(this.yaw);
-    const fwdZ = -Math.cos(this.yaw);
-    this.playerVel.x = this.wallRunNormal.x * 7.6 + fwdX * 8.8;
-    this.playerVel.z = this.wallRunNormal.z * 7.6 + fwdZ * 8.8;
-    this.playerVel.y = 9.9;
-    this.wallRunSide = 0;
-    this.wallRunTimer = 0;
-    this.wallRunCooldown = 0.22;
-    this.onGround = false;
-    this.jumpBufferTimer = 0;
-    this.triggerFlowBoost('WALL KICK', 0.42);
-    this.sound.playLedgeGrab();
-    this.sound.playWindRush(0.78);
-  }
-
-  private probeWallRunSurface(): {
-    side: -1 | 1;
-    normalX: number;
-    normalZ: number;
-    tangentX: number;
-    tangentZ: number;
-    id: string;
-  } | null {
-    _forward.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
-    _right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw)).normalize();
-
-    const probeReach = PLAYER_RADIUS + 0.58;
-    const sides: Array<-1 | 1> = [-1, 1];
-
-    for (const side of sides) {
-      const dirX = _right.x * side;
-      const dirZ = _right.z * side;
-      const px = this.playerPos.x + dirX * probeReach;
-      const pz = this.playerPos.z + dirZ * probeReach;
-
-      for (let i = 0; i < this.world.colliders.length; i++) {
-        const b = this.world.colliders[i];
-        if (b.ramp) continue;
-        if (!b.wallrunnable && b.maxY - b.minY < 2.2) continue;
-        if (b.id && b.id === this.lastWallColliderId) continue;
-        if (this.playerPos.y < b.minY - 0.35 || this.playerPos.y > b.maxY - 0.85) continue;
-
-        if (px >= b.minX && px <= b.maxX && pz >= b.minZ && pz <= b.maxZ) {
-          // Determine outward normal of the closest vertical face of the box
-          const dMinX = Math.abs(this.playerPos.x - b.minX);
-          const dMaxX = Math.abs(b.maxX - this.playerPos.x);
-          const dMinZ = Math.abs(this.playerPos.z - b.minZ);
-          const dMaxZ = Math.abs(b.maxZ - this.playerPos.z);
-          const minDist = Math.min(dMinX, dMaxX, dMinZ, dMaxZ);
-
-          let nx = 0;
-          let nz = 0;
-          if (minDist === dMinX) nx = -1;
-          else if (minDist === dMaxX) nx = 1;
-          else if (minDist === dMinZ) nz = -1;
-          else nz = 1;
-
-          // Must be oriented somewhat along the wall (not running head-on into it)
-          const fwdDot = Math.abs(_forward.x * nx + _forward.z * nz);
-          if (fwdDot > 0.68) continue;
-
-          // Tangent direction along wall matching player's forward heading
-          let tx = _forward.x - (_forward.x * nx + _forward.z * nz) * nx;
-          let tz = _forward.z - (_forward.x * nx + _forward.z * nz) * nz;
-          const tLen = Math.hypot(tx, tz) || 1;
-          tx /= tLen;
-          tz /= tLen;
-
-          return {
-            side,
-            normalX: nx,
-            normalZ: nz,
-            tangentX: tx,
-            tangentZ: tz,
-            id: b.id ?? `wall_${i}`,
-          };
-        }
-      }
-    }
-    return null;
-  }
-
-  private findMantleTarget(): {
-    box: BoxCollider;
-    targetX: number;
-    targetZ: number;
-    isLowVault: boolean;
-  } | null {
-    _forward.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
-
-    const probeDists = [0.65, 1.32, 1.72];
-    let bestBox: BoxCollider | null = null;
-    let bestY = -Infinity;
-    let bestTX = 0;
-    let bestTZ = 0;
-    let bestLowVault = false;
-    const wantsSprint = Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
-
-    for (const d of probeDists) {
-      const px = this.playerPos.x + _forward.x * d;
-      const pz = this.playerPos.z + _forward.z * d;
-
-      for (let i = 0; i < this.world.colliders.length; i++) {
-        const b = this.world.colliders[i];
-        if (!b.mantleable || b.ramp) continue;
-
-        if (px >= b.minX - 0.5 && px <= b.maxX + 0.5 && pz >= b.minZ - 0.5 && pz <= b.maxZ + 0.5) {
-          const ledgeDelta = b.maxY - this.playerPos.y;
-          const isRickshaw = b.id.startsWith('rickshaw_');
-          const maxVaultH = isRickshaw ? 2.08 : 1.55;
-          // Low obstacle Speed Vault window when sprinting (hurdles, walls, stalls, barricades, rickshaws)
-          if (wantsSprint && ledgeDelta >= 0.22 && ledgeDelta <= maxVaultH && b.maxY > bestY) {
-            bestY = b.maxY;
-            bestBox = b;
-            bestLowVault = true;
-
-            const spanX = b.maxX - b.minX;
-            const spanZ = b.maxZ - b.minZ;
-            const isThinCross = Math.abs(_forward.x) > Math.abs(_forward.z) ? spanX < 2.85 : spanZ < 2.85;
-            if (isThinCross) {
-              // Project forward past the far exit face so diagonal vaults never snag on box corners
-              const txMin = Math.abs(_forward.x) > 0.001 ? ((b.minX - 0.62) - this.playerPos.x) / _forward.x : Infinity;
-              const txMax = Math.abs(_forward.x) > 0.001 ? ((b.maxX + 0.62) - this.playerPos.x) / _forward.x : Infinity;
-              const tzMin = Math.abs(_forward.z) > 0.001 ? ((b.minZ - 0.62) - this.playerPos.z) / _forward.z : Infinity;
-              const tzMax = Math.abs(_forward.z) > 0.001 ? ((b.maxZ + 0.62) - this.playerPos.z) / _forward.z : Infinity;
-              const exitT = Math.min(Math.max(txMin, txMax), Math.max(tzMin, tzMax));
-              const stepDist = Number.isFinite(exitT) && exitT > d && exitT < 3.6 ? exitT : d + 1.85;
-              bestTX = this.playerPos.x + _forward.x * stepDist;
-              bestTZ = this.playerPos.z + _forward.z * stepDist;
-            } else {
-              const padX = Math.min(0.45, spanX * 0.35);
-              const padZ = Math.min(0.45, spanZ * 0.35);
-              bestTX = THREE.MathUtils.clamp(this.playerPos.x + _forward.x * (d + 0.72), b.minX + padX, b.maxX - padX);
-              bestTZ = THREE.MathUtils.clamp(this.playerPos.z + _forward.z * (d + 0.72), b.minZ + padZ, b.maxZ - padZ);
-            }
-          } else if (ledgeDelta >= 0.32 && ledgeDelta <= 2.85 && b.maxY > bestY) {
-            bestY = b.maxY;
-            bestBox = b;
-            bestLowVault = false;
-            const padX = Math.min(0.46, (b.maxX - b.minX) * 0.35);
-            const padZ = Math.min(0.46, (b.maxZ - b.minZ) * 0.35);
-            bestTX = THREE.MathUtils.clamp(this.playerPos.x + _forward.x * (d + 0.45), b.minX + padX, b.maxX - padX);
-            bestTZ = THREE.MathUtils.clamp(this.playerPos.z + _forward.z * (d + 0.45), b.minZ + padZ, b.maxZ - padZ);
-          }
-        }
-      }
-    }
-
-    return bestBox ? { box: bestBox, targetX: bestTX, targetZ: bestTZ, isLowVault: bestLowVault } : null;
-  }
-
-  private tryJumpOrMantle(): void {
-    if (this.mantling || this.vaulting || this.rollTimer > 0) return;
-
-    const wantsSprint = Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
-    const mantle = this.findMantleTarget();
-
-    // 1. Sprinting + Space right in front of a low obstacle triggers an instant one-handed Speed Vault!
-    if (wantsSprint && mantle && mantle.isLowVault) {
-      this.beginVault(mantle.box, mantle.targetX, mantle.targetZ);
-      return;
-    }
-
-    // 2. If grounded or inside 150ms coyote window, jump cleanly!
-    if (this.onGround || this.coyoteTimer > 0) {
-      const onRamp = this.playerPos.y > 0.16 && this.world.colliders.some(
-        (b) =>
-          b.ramp &&
-          this.playerPos.x >= b.minX - 0.35 &&
-          this.playerPos.x <= b.maxX + 0.35 &&
-          this.playerPos.z >= b.minZ - 0.35 &&
-          this.playerPos.z <= b.maxZ + 0.35,
-      );
-      this.playerVel.y = onRamp ? 10.8 : 9.5;
-      if (onRamp) {
-        this.playerVel.x *= 1.18;
-        this.playerVel.z *= 1.18;
-        this.triggerFlowBoost('RAMP LAUNCH', 0.28);
-      }
-      this.onGround = false;
-      this.coyoteTimer = 0;
-      this.jumpBufferTimer = 0;
-      this.slideTimer = 0;
-      this.sound.playWindRush(0.45);
-      return;
-    }
-
-    // 3. If airborne and pressing Space near an upper ledge, vault or mantle up!
-    if (mantle) {
-      if (mantle.isLowVault && wantsSprint) {
-        this.beginVault(mantle.box, mantle.targetX, mantle.targetZ);
-      } else {
-        this.beginMantle(mantle.box, mantle.targetX, mantle.targetZ);
-      }
-    }
-  }
-
-  private beginMantle(b: BoxCollider, targetX: number, targetZ: number): void {
-    this.preMantleSpeed = Math.hypot(this.playerVel.x, this.playerVel.z);
-    this.mantling = true;
-    this.mantleTimer = 0;
-    this.slideTimer = 0;
-    this.wallRunSide = 0;
-    this.wallRunTimer = 0;
-    this.mantleStart.copy(this.playerPos);
-    this.mantleEnd.set(targetX, b.maxY + 0.02, targetZ);
-    this.playerVel.set(0, 0, 0);
-    this.jumpBufferTimer = 0;
-    this.triggerFlowBoost('LEDGE MANTLE', 0.26);
-    this.sound.playLedgeGrab();
-    this.sound.playWindRush(0.55);
-  }
-
-  private beginVault(b: BoxCollider, targetX: number, targetZ: number): void {
-    this.preVaultSpeed = Math.hypot(this.playerVel.x, this.playerVel.z);
-    this.vaulting = true;
-    this.vaultTimer = 0;
-    this.slideTimer = 0;
-    this.wallRunSide = 0;
-    this.wallRunTimer = 0;
-    this.vaultStart.copy(this.playerPos);
-    const landedPast =
-      targetX <= b.minX - PLAYER_RADIUS ||
-      targetX >= b.maxX + PLAYER_RADIUS ||
-      targetZ <= b.minZ - PLAYER_RADIUS ||
-      targetZ >= b.maxZ + PLAYER_RADIUS;
-    this.vaultEnd.set(targetX, landedPast ? Math.min(this.playerPos.y, b.minY) : b.maxY + 0.02, targetZ);
-    this.vaultPeakY = b.maxY + 0.52;
-    this.jumpBufferTimer = 0;
-    this.triggerFlowBoost('SPEED VAULT', 0.36);
-    this.sound.playLedgeGrab();
-    this.sound.playWindRush(0.88);
-  }
-
-  private updatePlayerPhysics(dt: number): void {
-    this.wallRunCooldown = Math.max(0, this.wallRunCooldown - dt);
-    this.rollBufferTimer = Math.max(0, this.rollBufferTimer - dt);
-    this.parkourMoveTimer = Math.max(0, this.parkourMoveTimer - dt);
-    if (this.flowDecayTimer > 0) {
-      this.flowDecayTimer = Math.max(0, this.flowDecayTimer - dt);
-    } else if (this.parkourFlow > 0) {
-      this.parkourFlow = Math.max(0, this.parkourFlow - dt * 0.25);
-    }
-
-    // 0A. Zipline aerial traversal across Agra rooftops
-    if (this.activeZipline) {
-      const a = this.ziplineReverse ? this.activeZipline.end : this.activeZipline.start;
-      const b = this.ziplineReverse ? this.activeZipline.start : this.activeZipline.end;
-      const totalLen = a.distanceTo(b) || 1;
-      this.ziplineT += (16.5 * dt) / totalLen;
-      if (Math.random() < dt * 14) {
-        _tmpVecA.copy(this.playerPos).setY(this.playerPos.y + 1.85);
-        this.viewmodel.spawnSparks(_tmpVecA, 0xfde047, 1);
-      }
-      if (this.ziplineT >= 1) {
-        this.playerPos.copy(b);
-        this.activeZipline = null;
-        this.onGround = true;
-        this.playerVel.set(-Math.sin(this.yaw) * 8.5, 0, -Math.cos(this.yaw) * 8.5);
-        this.triggerFlowBoost('ZIPLINE FINISH', 0.25);
-      } else {
-        this.playerPos.lerpVectors(a, b, this.ziplineT);
-      }
-      this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, 88, Math.min(1, dt * 8));
-      this.camera.updateProjectionMatrix();
-      return;
-    }
-
-    // 0B. Watchtower Ladder Climbing
-    if (!this.activeLadder && !this.mantling && !this.vaulting) {
-      const climbUpInput = Boolean(this.keys['KeyW'] || this.keys['Space']);
-      const climbDownInput = Boolean(this.keys['KeyS']);
-      for (const lad of this.world.ladders) {
-        if (
-          this.playerPos.x >= lad.minX &&
-          this.playerPos.x <= lad.maxX &&
-          this.playerPos.z >= lad.minZ &&
-          this.playerPos.z <= lad.maxZ &&
-          this.playerPos.y >= lad.minY - 0.1 &&
-          this.playerPos.y <= lad.maxY + 0.1
-        ) {
-          if ((climbUpInput && this.playerPos.y < lad.maxY - 0.12) || (climbDownInput && this.playerPos.y > 0.25)) {
-            this.activeLadder = lad;
-            this.slideTimer = 0;
-            this.wallRunSide = 0;
-            this.playerVel.set(0, 0, 0);
-            break;
-          }
-        }
-      }
-    }
-
-    if (this.activeLadder) {
-      const lad = this.activeLadder;
-      const cx = (lad.minX + lad.maxX) * 0.5;
-      const cz = (lad.minZ + lad.maxZ) * 0.5;
-      this.playerPos.x = THREE.MathUtils.lerp(this.playerPos.x, cx, Math.min(1, dt * 12));
-      this.playerPos.z = THREE.MathUtils.lerp(this.playerPos.z, cz, Math.min(1, dt * 12));
-
-      const climbDir =
-        this.keys['KeyW'] || this.keys['Space'] ? 1 : this.keys['KeyS'] ? -1 : 0;
-      this.playerPos.y += climbDir * (climbDir > 0 ? 3.85 : 3.4) * dt;
-      this.playerVel.set(0, 0, 0);
-      this.onGround = false;
-
-      if (climbDir !== 0) {
-        this.ladderStepTimer -= dt;
-        if (this.ladderStepTimer <= 0) {
-          this.ladderStepTimer = 0.28;
-          this.sound.playWallStep(Math.floor(this.elapsed * 4) % 4);
-        }
-      }
-
-      if (this.playerPos.y >= lad.maxY - 0.08 && climbDir >= 0) {
-        this.playerPos.set(lad.exitX, lad.exitY, lad.exitZ);
-        this.activeLadder = null;
-        this.onGround = true;
-        this.triggerFlowBoost('LADDER CLIMB', 0.2);
-      } else if (this.playerPos.y <= lad.minY + 0.02 && climbDir < 0) {
-        this.playerPos.y = lad.minY;
-        this.activeLadder = null;
-        this.onGround = true;
-      } else if (this.keys['KeyA'] || this.keys['KeyD']) {
-        this.activeLadder = null;
-      }
-      return;
-    }
-
-    // 1A. Handle active One-Handed Speed Vault (0.3s, 15-degree camera tilt, full momentum carried!)
-    if (this.vaulting) {
-      this.vaultTimer += dt;
-      const t = Math.min(1, this.vaultTimer / 0.3);
-      this.playerPos.x = THREE.MathUtils.lerp(this.vaultStart.x, this.vaultEnd.x, t);
-      this.playerPos.z = THREE.MathUtils.lerp(this.vaultStart.z, this.vaultEnd.z, t);
-      const baseY = THREE.MathUtils.lerp(this.vaultStart.y, this.vaultEnd.y, t);
-      const lift = Math.max(0, this.vaultPeakY - baseY);
-      this.playerPos.y = baseY + Math.sin(t * Math.PI) * lift;
-      this.mantlePitchOffset = -Math.sin(t * Math.PI) * 0.14;
-      this.mantleRollOffset = Math.sin(t * Math.PI) * 0.26; // 15 deg (0.26 rad) vault roll!
-      this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, 88 + this.parkourFlow * 3, Math.min(1, dt * 12));
-      this.camera.updateProjectionMatrix();
-      if (t >= 1) {
-        this.playerPos.copy(this.vaultEnd);
-        this.vaulting = false;
-        this.onGround = true;
-        this.coyoteTimer = 0.15;
-        this.mantlePitchOffset = 0;
-        this.mantleRollOffset = 0;
-        const sprintSpeed = Math.max(this.preVaultSpeed, 11.4 + this.parkourFlow * 2.0);
-        this.playerVel.x = -Math.sin(this.yaw) * sprintSpeed;
-        this.playerVel.z = -Math.cos(this.yaw) * sprintSpeed;
-      }
-      return;
-    }
-
-    // 1B. Handle active Ledge Mantle / Climb-Up (0.42s with realistic initial weight dip)
-    if (this.mantling) {
-      this.mantleTimer += dt;
-      const t = Math.min(1, this.mantleTimer / 0.42);
-      const ease = 1 - Math.pow(1 - t, 3);
-      this.playerPos.lerpVectors(this.mantleStart, this.mantleEnd, ease);
-      const catchDip = t < 0.35 ? -Math.sin((t / 0.35) * Math.PI) * 0.2 : Math.sin(((t - 0.35) / 0.65) * Math.PI) * 0.2;
-      this.playerPos.y += catchDip;
-      this.mantlePitchOffset = t < 0.35 ? Math.sin((t / 0.35) * Math.PI) * 0.1 : -Math.sin(t * Math.PI) * 0.16;
-      this.mantleRollOffset = Math.sin(t * Math.PI) * 0.065;
-      if (t >= 1) {
-        this.playerPos.copy(this.mantleEnd);
-        this.mantling = false;
-        this.onGround = true;
-        this.coyoteTimer = 0.15;
-        this.mantlePitchOffset = 0;
-        this.mantleRollOffset = 0;
-        const wantsSprintCarry = Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']) || this.preMantleSpeed > 8.5;
-        if (this.keys['KeyW'] || wantsSprintCarry) {
-          const fwdSpeed = wantsSprintCarry ? Math.max(this.preMantleSpeed, 10.8 + this.parkourFlow * 2.0) : 6.8;
-          this.playerVel.x = -Math.sin(this.yaw) * fwdSpeed;
-          this.playerVel.z = -Math.cos(this.yaw) * fwdSpeed;
-        }
-      }
-      return;
-    }
-
-    this.mantlePitchOffset = THREE.MathUtils.lerp(this.mantlePitchOffset, 0, Math.min(1, dt * 14));
-    this.mantleRollOffset = THREE.MathUtils.lerp(this.mantleRollOffset, 0, Math.min(1, dt * 14));
-    this.landingDipOffset = THREE.MathUtils.lerp(this.landingDipOffset, 0, Math.min(1, dt * 11));
-
-    // Smooth camera yaw toward Arkham lunge target
-    if (this.targetYawGoal !== null) {
-      let diff = ((this.targetYawGoal - this.yaw + Math.PI) % (Math.PI * 2)) - Math.PI;
-      if (diff < -Math.PI) diff += Math.PI * 2;
-      this.yaw += diff * Math.min(1, dt * 16);
-      if (Math.abs(diff) < 0.03) this.targetYawGoal = null;
-    }
-
-    // Movement input
-    const moveFwd = (this.keys['KeyW'] ? 1 : 0) - (this.keys['KeyS'] ? 1 : 0);
-    const moveStrafe = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
-
-    _forward.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
-    _right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-    _moveDir.set(0, 0, 0).addScaledVector(_forward, moveFwd).addScaledVector(_right, moveStrafe);
-    const moving = _moveDir.lengthSq() > 0.001;
-    if (moving) _moveDir.normalize();
-
-    const wantsSprint = Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']);
-    const isSprinting = wantsSprint && moving && this.stamina > 2;
-
-    if (isSprinting) {
-      this.stamina = Math.max(0, this.stamina - 20 * dt);
-      this.staminaPauseTimer = 0.65;
-      this.sprintWindTimer -= dt;
-      if (this.sprintWindTimer <= 0 && this.onGround) {
-        this.sprintWindTimer = 0.55;
-        this.sound.playWindRush(0.28 + this.parkourFlow * 0.25);
-      }
-    } else {
-      this.staminaPauseTimer = Math.max(0, this.staminaPauseTimer - dt);
-      if (this.staminaPauseTimer <= 0) {
-        this.stamina = Math.min(this.maxStamina, this.stamina + 32 * dt);
-      }
-    }
-
-    // Active Safety Landing Roll (360-degree forward camera tumble + momentum carry)
-    if (this.rollTimer > 0) {
-      this.rollTimer = Math.max(0, this.rollTimer - dt);
-      const p = 1 - this.rollTimer / 0.42;
-      this.rollPitchOffset = -p * Math.PI * 2;
-      const rollSpeed = 11.4 * (1 - p * 0.2);
-      this.playerVel.x = this.rollDir.x * rollSpeed;
-      this.playerVel.z = this.rollDir.z * rollSpeed;
-      if (this.rollTimer <= 0) {
-        this.rollPitchOffset = 0;
-      }
-    } else {
-      this.rollPitchOffset = 0;
-    }
-
-    // Wall Run Detection & Traversal when airborne near vertical walls
-    const horizSpeed = Math.hypot(this.playerVel.x, this.playerVel.z);
-    if (!this.onGround && this.rollTimer <= 0 && moveFwd > 0) {
-      const probe = this.probeWallRunSurface();
-      if (this.wallRunSide !== 0) {
-        if (this.wallRunTimer > 0 && probe && probe.side === this.wallRunSide) {
-          this.wallRunTimer -= dt;
-          this.wallRunNormal.set(probe.normalX, 0, probe.normalZ);
-          this.wallRunTangent.set(probe.tangentX, 0, probe.tangentZ);
-          this.wallRunStepTimer -= dt;
-          if (this.wallRunStepTimer <= 0) {
-            this.wallRunStepTimer = 0.22;
-            this.wallRunStepCount++;
-            this.sound.playWallStep(this.wallRunStepCount);
-          }
-          const wrSpeed = 12.2 + this.parkourFlow * 1.6;
-          this.playerVel.x = this.wallRunTangent.x * wrSpeed;
-          this.playerVel.z = this.wallRunTangent.z * wrSpeed;
-          this.playerVel.y = Math.max(-1.8, this.playerVel.y - 7.0 * dt);
-        } else {
-          this.wallRunSide = 0;
-          this.wallRunCooldown = 0.24;
-        }
-      } else if (
-        this.wallRunCooldown <= 0 &&
-        (wantsSprint || horizSpeed > 5.4) &&
-        this.playerVel.y > -8.5 &&
-        probe
-      ) {
-        this.wallRunSide = probe.side;
-        this.wallRunTimer = 1.15;
-        this.wallRunNormal.set(probe.normalX, 0, probe.normalZ);
-        this.wallRunTangent.set(probe.tangentX, 0, probe.tangentZ);
-        this.lastWallColliderId = probe.id;
-        this.wallRunStepTimer = 0.03;
-        this.wallRunStepCount = 1;
-        this.playerVel.y = Math.max(this.playerVel.y, 2.5);
-        this.triggerFlowBoost('WALL RUN', 0.35);
-        this.sound.playWallStep(1);
-        this.sound.playWindRush(0.55);
-      }
-    } else if (this.onGround || moveFwd <= 0) {
-      this.wallRunSide = 0;
-    }
-
-    const baseSpeed = isSprinting ? 10.8 + this.parkourFlow * 2.2 : 6.7;
-    if (this.lungeTimer > 0) {
-      this.lungeTimer -= dt;
-      this.playerVel.x = this.lungeVel.x;
-      this.playerVel.z = this.lungeVel.z;
-    } else if (this.rollTimer > 0) {
-      // Velocity already carried smoothly during safety roll
-    } else if (this.wallRunSide !== 0) {
-      // Velocity driven cleanly along wallRunTangent
-    } else if (this.slideTimer > 0) {
-      this.slideTimer -= dt;
-      this.slideDustTimer -= dt;
-      if (this.slideDustTimer <= 0) {
-        this.slideDustTimer = 0.09;
-        this.viewmodel.spawnDustPuffs(this.playerPos, 3);
-      }
-      const slideSpeed = 14.2 * (0.45 + 0.55 * (this.slideTimer / 0.54));
-      this.playerVel.x = this.slideDir.x * slideSpeed;
-      this.playerVel.z = this.slideDir.z * slideSpeed;
-      // Slide knocks down/trips zombies in path
-      for (const z of this.zombies.zombies) {
-        if (z.state === 'dead' || z.state === 'stunned') continue;
-        if (this.playerPos.distanceTo(z.pos) < 1.9 && Math.abs(this.playerPos.y - z.pos.y) < 1.5) {
-          const killed = this.zombies.damageZombie(z, 14, this.slideDir, 10.2, 1.25);
-          if (killed) this.killCount++;
-          this.sound.playKick(true);
+      for (const other of this.enemies) {
+        if (other !== attacker && !other.dead && other.root.position.distanceTo(this.playerPos) < 3.6) {
+          other.staggerTimer = 1.15;
+          other.windupTimer = 0;
+          other.counterIcon.visible = false;
         }
       }
     } else {
-      const accel = this.onGround ? 16 : 9.5;
-      this.playerVel.x = THREE.MathUtils.lerp(this.playerVel.x, _moveDir.x * baseSpeed, Math.min(1, accel * dt));
-      this.playerVel.z = THREE.MathUtils.lerp(this.playerVel.z, _moveDir.z * baseSpeed, Math.min(1, accel * dt));
+      this.audio.playSwing();
     }
+  }
 
-    const targetEyeOff =
-      this.rollTimer > 0
-        ? -Math.sin((1 - this.rollTimer / 0.42) * Math.PI) * 0.78
-        : this.slideTimer > 0
-          ? -0.82
-          : 0;
-    this.eyeHeightOffset = THREE.MathUtils.lerp(this.eyeHeightOffset, targetEyeOff, Math.min(1, dt * 16));
-
-    // Update coyote & jump buffer timers
-    if (this.onGround) {
-      this.coyoteTimer = 0.14;
-      this.lastWallColliderId = '';
-      if (this.jumpBufferTimer > 0) {
-        this.jumpBufferTimer = 0;
-        this.playerVel.y = 9.4;
-        this.onGround = false;
-        this.coyoteTimer = 0;
-      }
-    } else {
-      this.coyoteTimer = Math.max(0, this.coyoteTimer - dt);
-      this.jumpBufferTimer = Math.max(0, this.jumpBufferTimer - dt);
+  private startPistolReload() {
+    if (this.pistolReloadTimer > 0 || this.pistolAmmo >= this.pistolMagSize || this.pistolReserve <= 0) {
+      return;
     }
+    this.pistolReloadTimer = 1.05;
+    this.aimingDownSights = false;
+    this.audio.playParkour();
+    this.setParkourLabel('RELOADING 9MM');
+  }
 
-    // Gravity (skip full gravity while wall-running)
-    if (this.wallRunSide === 0) {
-      this.playerVel.y -= 21 * dt;
-    }
-
-    // Auto-vault or Auto-mantle if airborne & moving forward toward an edge!
-    const mantlePreview = this.findMantleTarget();
-    this.canMantle = mantlePreview !== null;
-    if (
-      !this.onGround &&
-      this.rollTimer <= 0 &&
-      moveFwd > 0 &&
-      (this.playerVel.y < 5.8 || this.keys['Space'] || this.wallRunSide !== 0) &&
-      mantlePreview
-    ) {
-      if (mantlePreview.isLowVault && wantsSprint) {
-        this.beginVault(mantlePreview.box, mantlePreview.targetX, mantlePreview.targetZ);
-      } else {
-        this.beginMantle(mantlePreview.box, mantlePreview.targetX, mantlePreview.targetZ);
-      }
+  private triggerPistolShot() {
+    if (this.pistolFireTimer > 0 || this.pistolReloadTimer > 0 || this.takedownTimer > 0) return;
+    if (this.pistolAmmo <= 0) {
+      this.startPistolReload();
       return;
     }
 
-    // Integrate X/Z then resolve horizontal collisions
-    this.playerPos.x += this.playerVel.x * dt;
-    this.playerPos.z += this.playerVel.z * dt;
+    this.pistolAmmo -= 1;
+    this.pistolFireTimer = 0.21;
+    this.pistolFlashTimer = 0.055;
+    this.slideKick = 1.0;
+    this.pistolMuzzleFlash.visible = true;
+    this.audio.playGunshot();
 
-    for (let i = 0; i < this.world.colliders.length; i++) {
-      const b = this.world.colliders[i];
-      const boxTop = this.getColliderTopAt(b, this.playerPos.x, this.playerPos.z);
-      if (this.playerPos.y >= boxTop - 0.12 || this.playerPos.y + PLAYER_EYE_HEIGHT < b.minY) continue;
+    // Camera-aligned ray check against zombies up to 48m (supports headshots & Hazmat tank bursts)
+    this.camera.getWorldDirection(_forward);
+    let bestEnemy: EnemyActor | null = null;
+    let bestDist = 48.0;
+    let isHeadshot = false;
 
-      const closestX = Math.max(b.minX, Math.min(this.playerPos.x, b.maxX));
-      const closestZ = Math.max(b.minZ, Math.min(this.playerPos.z, b.maxZ));
-      const dx = this.playerPos.x - closestX;
-      const dz = this.playerPos.z - closestZ;
-      const distSq = dx * dx + dz * dz;
-
-      if (distSq < PLAYER_RADIUS * PLAYER_RADIUS) {
-        if (b.ramp && this.playerPos.y >= boxTop - 0.72) {
-          this.playerPos.y = boxTop;
-        } else if (this.onGround && boxTop - this.playerPos.y <= 0.64) {
-          this.playerPos.y = boxTop;
-        } else {
-          const dist = Math.sqrt(distSq) || 0.001;
-          const nx = dx / dist;
-          const nz = dz / dist;
-          const push = PLAYER_RADIUS - dist;
-          this.playerPos.x += nx * push;
-          this.playerPos.z += nz * push;
-          // Slide velocity cleanly along corners/edges instead of dead-stopping momentum
-          const vn = this.playerVel.x * nx + this.playerVel.z * nz;
-          if (vn < 0) {
-            this.playerVel.x -= nx * vn;
-            this.playerVel.z -= nz * vn;
-          }
-        }
+    for (const enemy of this.enemies) {
+      if (enemy.dead) continue;
+      const isHound = enemy.kind === 'hound';
+      _v1.copy(enemy.root.position);
+      _v1.y += isHound ? 0.55 : 1.15;
+      _v2.subVectors(_v1, this.camera.position);
+      const proj = _v2.dot(_forward);
+      if (proj < 0.8 || proj > bestDist) continue;
+      const perpSq = _v2.lengthSq() - proj * proj;
+      const hitRadius = enemy.radius + (this.aimingDownSights ? 0.34 : 0.42);
+      if (perpSq <= hitRadius * hitRadius) {
+        bestDist = proj;
+        bestEnemy = enemy;
+        const headY = enemy.root.position.y + (isHound ? 0.68 : 1.55);
+        const rayY = this.camera.position.y + _forward.y * proj;
+        isHeadshot = Math.abs(rayY - headY) < 0.42;
       }
     }
 
-    this.playerPos.x = THREE.MathUtils.clamp(this.playerPos.x, -44.2, 44.2);
-    this.playerPos.z = THREE.MathUtils.clamp(this.playerPos.z, -93, 49.5);
+    const muzzleWorld = new THREE.Vector3();
+    this.pistolMuzzleFlash.getWorldPosition(muzzleWorld);
+    const hitPoint = bestEnemy
+      ? new THREE.Vector3(
+          bestEnemy.root.position.x,
+          bestEnemy.root.position.y + (isHeadshot ? 1.55 : 1.12),
+          bestEnemy.root.position.z,
+        )
+      : this.camera.position.clone().addScaledVector(_forward, 36);
+    this.spawnBulletTracer(muzzleWorld, hitPoint);
 
-    // Integrate Y and resolve ground / roof / thin bridge planks / sloped ramps
-    const prevY = this.playerPos.y;
-    const impactVel = this.playerVel.y;
-    this.playerPos.y += this.playerVel.y * dt;
-
-    let groundHeight = 0;
-    let landedCushion = false;
-    for (let i = 0; i < this.world.colliders.length; i++) {
-      const b = this.world.colliders[i];
-      if (
-        this.playerPos.x + PLAYER_RADIUS * 0.72 > b.minX &&
-        this.playerPos.x - PLAYER_RADIUS * 0.72 < b.maxX &&
-        this.playerPos.z + PLAYER_RADIUS * 0.72 > b.minZ &&
-        this.playerPos.z - PLAYER_RADIUS * 0.72 < b.maxZ
-      ) {
-        const topY = this.getColliderTopAt(b, this.playerPos.x, this.playerPos.z);
-        const snapMargin = b.ramp ? 0.7 : 0.34;
-        if (prevY >= topY - snapMargin && this.playerPos.y <= topY + (b.ramp ? 0.28 : 0.04)) {
-          if (topY >= groundHeight) {
-            groundHeight = topY;
-            landedCushion = Boolean(b.cushion);
-          }
-        }
+    if (bestEnemy) {
+      const dmg = isHeadshot ? 58 : 34;
+      this.applyDamageToEnemy(bestEnemy, dmg, 4.5, isHeadshot);
+      if (isHeadshot) {
+        this.setParkourLabel('HEADSHOT');
       }
     }
 
-    if (this.playerPos.y <= groundHeight) {
-      if (!this.onGround && impactVel < -7.2) {
-        if (impactVel < -10.2 && (this.rollBufferTimer > 0 || landedCushion)) {
-          // Dying Light Active Safety Landing Roll (negates heavy stun & converts drop into forward flow!)
-          this.rollTimer = 0.42;
-          this.rollBufferTimer = 0;
-          this.rollDir.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)).normalize();
-          this.sound.playSafetyRoll();
-          if (landedCushion) this.sound.playTarpLand();
-          this.cameraShake = 0.07;
-          this.landingDipOffset = -0.22;
-          this.viewmodel.spawnDustPuffs(this.playerPos, 9);
-          this.triggerFlowBoost('SAFETY ROLL', 0.42);
-        } else if (landedCushion) {
-          this.sound.playTarpLand();
-          this.landingDipOffset = -0.18;
-        } else {
-          const heavy = impactVel < -12.5;
-          this.sound.playLandingThud(heavy);
-          this.cameraShake = heavy ? 0.24 : 0.11;
-          this.landingDipOffset = heavy ? -0.34 : -0.15;
-          this.viewmodel.spawnDustPuffs(this.playerPos, heavy ? 10 : 5);
-        }
-      }
-      this.playerPos.y = groundHeight;
-      this.playerVel.y = 0;
-      this.onGround = true;
-      this.wallRunSide = 0;
-    } else {
-      this.onGround = false;
-    }
-
-    // Smooth dynamic FOV widening while sprinting, wall-running, sliding, or dropkicking
-    const targetFov =
-      this.dropkickTimer > 0 || this.slideTimer > 0 || this.rollTimer > 0
-        ? 90
-        : this.wallRunSide !== 0
-          ? 87
-          : isSprinting
-            ? 84 + this.parkourFlow * 4.5
-            : 76;
-    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
-      this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFov, Math.min(1, dt * 10));
-      this.camera.updateProjectionMatrix();
+    if (this.pistolAmmo === 0 && this.pistolReserve > 0) {
+      this.startPistolReload();
     }
   }
 
-  private syncCameraToPlayer(dt: number): void {
-    const moveMag = Math.hypot(this.playerVel.x, this.playerVel.z);
-    const bob =
-      (this.onGround || this.wallRunSide !== 0) &&
-      moveMag > 0.8 &&
-      !this.mantling &&
-      !this.vaulting &&
-      this.slideTimer <= 0 &&
-      this.rollTimer <= 0
-        ? Math.sin(this.elapsed * (moveMag > 8 ? 14 : 9)) * 0.048
-        : 0;
-    const sprintSwayRoll =
-      this.onGround && moveMag > 8 && !this.mantling && !this.vaulting && this.slideTimer <= 0 && this.rollTimer <= 0
-        ? Math.cos(this.elapsed * 7.0) * 0.014
-        : 0;
+  private triggerLeftFistJab() {
+    if (this.leftJabTimer > 0 || this.counterAnimTimer > 0) return;
+    this.leftJabTimer = 0.34;
+    this.gesturePose = 'fist';
+    this.gestureTimer = 0.42;
+    this.audio.playSwing();
+    this.setParkourLabel('FIST JAB');
 
-    const shakeX = this.cameraShake > 0 ? (Math.random() - 0.5) * this.cameraShake * 0.25 : 0;
-    const shakeY = this.cameraShake > 0 ? (Math.random() - 0.5) * this.cameraShake * 0.25 : 0;
-
-    this.camera.position.set(
-      this.playerPos.x + shakeX,
-      this.playerPos.y + PLAYER_EYE_HEIGHT + this.eyeHeightOffset + this.landingDipOffset + bob + shakeY,
-      this.playerPos.z,
-    );
-    this.camera.rotation.order = 'YXZ';
-    this.camera.rotation.y = this.yaw;
-    this.camera.rotation.x = THREE.MathUtils.clamp(this.pitch + this.mantlePitchOffset, -1.45, 1.45) + this.rollPitchOffset;
-
-    const strafe = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
-    const slideRoll = this.slideTimer > 0 ? -0.095 : 0;
-    const wallRunRoll = this.wallRunSide * -0.22;
-    const targetRoll = -strafe * 0.02 + this.mantleRollOffset + slideRoll + wallRunRoll + sprintSwayRoll;
-    this.camera.rotation.z = THREE.MathUtils.lerp(this.camera.rotation.z, targetRoll, Math.min(1, (dt || 0.016) * 12));
+    const target = this.findNearestTarget(2.8, 0.35);
+    if (target) {
+      target.staggerTimer = Math.max(target.staggerTimer, 1.35);
+      this.applyDamageToEnemy(target, 24, 7.5, true);
+    }
   }
 
-  // =========================================================================
-  // DYNAMIC DAY / NIGHT CYCLE WITH GOLDEN SUNSET SKY & MOONLIGHT
-  // =========================================================================
-  private isNightTime(): boolean {
-    return this.timeOfDay >= 0.08 && this.timeOfDay < 0.52;
+  private cycleHandGesture() {
+    const order: HandPose[] = ['point', 'peace', 'thumbsUp', 'fist', 'open'];
+    const idx = order.indexOf(this.gesturePose);
+    const next = order[(idx + 1) % order.length];
+    this.gesturePose = next;
+    this.gestureTimer = next === 'open' ? 0 : 2.2;
+    this.audio.playParkour();
+    const labelMap: Record<HandPose, string> = {
+      point: 'SIGNAL · POINT',
+      peace: 'GESTURE · PEACE SIGN',
+      thumbsUp: 'SIGNAL · THUMBS UP',
+      fist: 'STANCE · CLENCHED FIST',
+      open: 'STANCE · OPEN HAND',
+      gripMelee: 'GRIP',
+      gripPistol: 'GRIP',
+    };
+    this.setParkourLabel(labelMap[next]);
   }
 
-  private formatClock24h(): string {
-    const hoursFloat = (18.9834 + this.timeOfDay * 24) % 24;
-    const h = Math.floor(hoursFloat);
-    const m = Math.floor((hoursFloat - h) * 60);
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-  }
+  private triggerHeavyTakedown() {
+    // Requirement 2: [R] Heavy Takedown shockwave at 5x combo
+    if (this.combo < 5 || this.takedownTimer > 0) return;
+    const target = this.findNearestTarget(5.8, 0.2);
+    if (!target) return;
 
-  private getTimeLabel(): string {
-    if (this.timeOfDay >= 0.08 && this.timeOfDay < 0.52) return 'Nightfall · UV Active';
-    if (this.timeOfDay >= 0.52 && this.timeOfDay < 0.7) return 'Agra Dawn';
-    return 'Golden Dusk';
-  }
+    this.takedownTimer = 0.48;
+    this.combo = Math.max(0, this.combo - 5);
+    this.gesturePose = 'thumbsUp';
+    this.gestureTimer = 1.4;
+    this.audio.playTakedown();
+    this.setParkourLabel('HEAVY TAKEDOWN SHOCKWAVE');
+    this.setVikramCallout(VIKRAM_CALLOUTS.takedown, 4.5);
 
-  private updateAtmosphere(dt: number): void {
-    if (this.phase === 'playing') {
-      this.timeOfDay = (this.timeOfDay + dt / FULL_CYCLE_SECONDS) % 1;
+    _v1.subVectors(target.root.position, this.playerPos);
+    _v1.y = 0;
+    const dist = _v1.length();
+    if (dist > 1.2) {
+      _v1.divideScalar(Math.max(0.01, dist));
+      this.lungeTimer = 0.2;
+      this.lungeDir.copy(_v1).multiplyScalar(Math.min(18, dist * 5));
     }
 
-    const t = this.timeOfDay;
-    const isNight = this.isNightTime();
-
-    if (this.phase === 'playing' && isNight && !this.wasNight) {
-      if (!this.flashlightOn) {
-        this.flashlightOn = true;
-        this.flashlight.intensity = 6.5;
-        this.sound.playFlashlightClick();
-      }
-      if (!this.nightSubtitleShown) {
-        this.nightSubtitleShown = true;
-        this.setSubtitle(
-          'OVERWATCH RADIO',
-          'Nightfall! UV lights are active at the Taj Mahal. Night Runners are hunting — watch your back!',
-          8.5,
-        );
+    // Shockwave burst at target location damaging/staggering nearby zombies
+    this.spawnShockwaveRing(target.root.position, 0xfbbf24, 4.8);
+    for (const other of this.enemies) {
+      if (other.dead || other === target) continue;
+      const d = other.root.position.distanceTo(target.root.position);
+      if (d <= 4.8) {
+        this.applyDamageToEnemy(other, 55, 11, true, false);
       }
     }
-    this.wasNight = isNight;
 
-    let nightFactor = 0;
-    if (t < 0.08) {
-      const k = t / 0.08;
-      this.skyMat.uniforms.topColor.value.lerpColors(_skyTopDay, _skyTopTwilight, k);
-      this.skyMat.uniforms.horizonColor.value.lerpColors(_skyHorizDay, _skyHorizTwilight, k);
-      nightFactor = k * 0.45;
-    } else if (t < 0.16) {
-      const k = (t - 0.08) / 0.08;
-      this.skyMat.uniforms.topColor.value.lerpColors(_skyTopTwilight, _skyTopNight, k);
-      this.skyMat.uniforms.horizonColor.value.lerpColors(_skyHorizTwilight, _skyHorizNight, k);
-      nightFactor = 0.45 + k * 0.55;
-    } else if (t < 0.46) {
-      this.skyMat.uniforms.topColor.value.copy(_skyTopNight);
-      this.skyMat.uniforms.horizonColor.value.copy(_skyHorizNight);
-      nightFactor = 1.0;
-    } else if (t < 0.58) {
-      const k = (t - 0.46) / 0.12;
-      this.skyMat.uniforms.topColor.value.lerpColors(_skyTopNight, _skyTopTwilight, k);
-      this.skyMat.uniforms.horizonColor.value.lerpColors(_skyHorizNight, _skyHorizDay, k);
-      nightFactor = 1.0 - k * 0.7;
-    } else if (t < 0.72) {
-      const k = (t - 0.58) / 0.14;
-      this.skyMat.uniforms.topColor.value.lerpColors(_skyTopTwilight, _skyTopDay, k);
-      this.skyMat.uniforms.horizonColor.value.copy(_skyHorizDay);
-      nightFactor = 0.3 * (1 - k);
-    } else {
-      this.skyMat.uniforms.topColor.value.copy(_skyTopDay);
-      this.skyMat.uniforms.horizonColor.value.copy(_skyHorizDay);
-      nightFactor = 0;
-    }
-
-    _skyFogCurrent.copy(this.skyMat.uniforms.horizonColor.value);
-    (this.scene.background as THREE.Color).copy(_skyFogCurrent);
-    if (this.scene.fog instanceof THREE.FogExp2) {
-      this.scene.fog.color.copy(_skyFogCurrent);
-      this.scene.fog.density = THREE.MathUtils.lerp(0.0068, 0.018, nightFactor);
-    }
-
-    const sunAngle = t * Math.PI * 2;
-    _sunDir.set(Math.cos(sunAngle) * 0.45, 0.22 + Math.cos(sunAngle) * 0.16, -0.88).normalize();
-    this.skyMat.uniforms.sunDir.value.copy(_sunDir);
-    this.skyMat.uniforms.sunColor.value.lerpColors(_sunColorDay, _sunColorMoon, nightFactor);
-    this.skyMat.uniforms.sunIntensity.value = THREE.MathUtils.lerp(0.85, 0.45, nightFactor);
-
-    this.sunLight.color.lerpColors(_sunColorDay, _sunColorMoon, nightFactor);
-    this.sunLight.intensity = THREE.MathUtils.lerp(1.45, 0.55, nightFactor);
-    this.sunLight.position.copy(_sunDir).multiplyScalar(75);
-
-    this.hemiLight.color.lerpColors(_hemiSkyDay, _hemiSkyNight, nightFactor);
-    this.hemiLight.groundColor.lerpColors(_hemiGroundDay, _hemiGroundNight, nightFactor);
-    this.hemiLight.intensity = THREE.MathUtils.lerp(0.6, 0.36, nightFactor);
-
-    const uvPower = THREE.MathUtils.lerp(5, 13, nightFactor);
-    this.world.uvLights.forEach((l, idx) => {
-      l.intensity = idx === this.world.uvLights.length - 1 ? uvPower * 1.5 : uvPower;
-    });
-    this.world.floodLights.forEach((f) => {
-      f.intensity = THREE.MathUtils.lerp(4, 9.5, nightFactor);
-    });
-    // String lights glow brighter at night on rooftop bridges
-    const bulbEmissive = THREE.MathUtils.lerp(1.2, 2.8, nightFactor);
-    this.world.stringBulbMats.forEach((m) => {
-      m.emissiveIntensity = bulbEmissive;
-    });
-
-    this.skyMesh.position.copy(this.camera.position);
+    this.applyDamageToEnemy(target, 999, 10, true, true);
+    this.health = Math.min(this.maxHealth, this.health + 24);
+    this.stamina = Math.min(this.maxStamina, this.stamina + 35);
+    this.score += 200;
   }
 
-  private startLoop(): void {
+  private detonateHazmatTank(hazmat: EnemyActor) {
+    this.audio.playExplosion();
+    this.spawnShockwaveRing(hazmat.root.position, 0xef4444, 4.4);
+    this.setParkourLabel('HAZMAT TANK BLAST');
+
+    for (const other of this.enemies) {
+      if (other.dead || other === hazmat) continue;
+      const d = other.root.position.distanceTo(hazmat.root.position);
+      if (d <= 4.4) {
+        this.applyDamageToEnemy(other, 70, 12, true, false);
+      }
+    }
+  }
+
+  private applyDamageToEnemy(
+    enemy: EnemyActor,
+    amount: number,
+    knockback: number,
+    heavy: boolean,
+    countCombo = true,
+  ) {
+    enemy.hp -= amount;
+    enemy.hitFlashTimer = 0.16;
+    enemy.windupTimer = 0;
+    enemy.counterIcon.visible = false;
+    enemy.staggerTimer = Math.max(enemy.staggerTimer, heavy ? 0.85 : 0.32);
+
+    _v2.subVectors(enemy.root.position, this.playerPos).setY(0).normalize();
+    enemy.velocity.addScaledVector(_v2, knockback);
+
+    if (countCombo) {
+      this.combo += 1;
+      this.maxCombo = Math.max(this.maxCombo, this.combo);
+      this.comboDecayTimer = 4.4;
+      this.score += (heavy ? 45 : 25) * Math.min(5, 1 + Math.floor(this.combo / 3));
+    }
+    this.audio.playImpact(heavy);
+
+    if (enemy.hp <= 0 && !enemy.dead) {
+      enemy.dead = true;
+      enemy.deathTimer = 0.75;
+      this.kills += 1;
+      this.score += enemy.kind === 'hound' ? 120 : 100;
+      if (enemy.hasExplosiveTank) {
+        this.detonateHazmatTank(enemy);
+      }
+    }
+  }
+
+  private startLoop() {
     const tick = () => {
       if (this.disposed) return;
+      const dt = Math.min(0.05, this.clock.getDelta());
+      const elapsed = this.clock.elapsedTime;
 
-      const now = performance.now();
-      const rawDt = Math.min(0.05, Math.max(0.001, (now - this.lastNow) / 1000));
-      this.lastNow = now;
+      this.updateAtmosphere(dt, elapsed);
+      this.updateVfx(dt);
 
-      let timeScale = 1.0;
-      if (this.hitstopTimer > 0) {
-        this.hitstopTimer = Math.max(0, this.hitstopTimer - rawDt);
-        timeScale = 0.03;
-      } else if (this.slowMoTimer > 0) {
-        this.slowMoTimer = Math.max(0, this.slowMoTimer - rawDt);
-        timeScale = 0.28;
-      }
-      const dt = rawDt * timeScale;
-      this.elapsed += dt;
-
-      if (this.phase === 'playing') {
-        if (!this.radioOpen) {
-          this.playTimeSeconds += rawDt;
-          this.attackCooldown = Math.max(0, this.attackCooldown - rawDt);
-          this.kickCooldown = Math.max(0, this.kickCooldown - rawDt);
-          this.dropkickTimer = Math.max(0, this.dropkickTimer - rawDt);
-          this.slideCooldown = Math.max(0, this.slideCooldown - rawDt);
-          this.firecrackerCooldown = Math.max(0, this.firecrackerCooldown - rawDt);
-          this.cameraShake = Math.max(0, this.cameraShake - rawDt * 1.6);
-          this.damageFlash = Math.max(0, this.damageFlash - rawDt * 2.2);
-          this.parryFlash = Math.max(0, this.parryFlash - rawDt * 2.4);
-
-          for (let i = this.directionalHits.length - 1; i >= 0; i--) {
-            this.directionalHits[i].intensity -= rawDt * 1.35;
-            if (this.directionalHits[i].intensity <= 0) {
-              this.directionalHits.splice(i, 1);
-            }
-          }
-
-          if (this.comboCount > 0) {
-            this.comboTimer -= rawDt;
-            if (this.comboTimer <= 0) {
-              this.comboCount = 0;
-              this.comboTimer = 0;
-            }
-          }
-
-          if (this.subtitleTimer > 0) {
-            this.subtitleTimer = Math.max(0, this.subtitleTimer - rawDt);
-          }
-
-          this.updatePlayerPhysics(dt);
-          this.syncCameraToPlayer(dt);
-
-          const moveSpeedRatio = Math.min(1, Math.hypot(this.playerVel.x, this.playerVel.z) / 9.5);
-          const isSprinting = Boolean(this.keys['ShiftLeft'] || this.keys['ShiftRight']) && moveSpeedRatio > 0.65;
-          const isLookingDown = this.onGround && this.pitch < -0.72;
-
-          this.viewmodel.update(
-            dt,
-            this.elapsed,
-            moveSpeedRatio,
-            isSprinting,
-            this.mantling,
-            !this.onGround,
-            this.canMantle,
-            this.slideTimer > 0,
-            this.activeZipline !== null,
-            this.vaulting,
-            isLookingDown,
-            this.wallRunSide,
-            this.rollTimer > 0,
-            () => {
-              this.sound.playFirecrackerBang();
-            },
-          );
-
-          const lurePos = this.viewmodel.getActiveLurePosition();
-          this.zombies.update(
-            dt,
-            this.playerPos,
-            this.isNightTime(),
-            lurePos,
-            this.world.colliders,
-            this.world.tajSafeZone,
-            (dmg, attackerPos) => {
-              this.health = Math.max(0, this.health - dmg);
-              this.comboCount = 0;
-              this.comboTimer = 0;
-              this.damageFlash = 0.72;
-              this.cameraShake = 0.28;
-              this.sound.playPlayerHurt();
-
-              // Directional damage indicator pointing toward side/rear attacker
-              const dx = attackerPos.x - this.playerPos.x;
-              const dz = attackerPos.z - this.playerPos.z;
-              const fwdX = -Math.sin(this.yaw);
-              const fwdZ = -Math.cos(this.yaw);
-              const rightX = Math.cos(this.yaw);
-              const rightZ = -Math.sin(this.yaw);
-              const relAngleRad = Math.atan2(dx * rightX + dz * rightZ, dx * fwdX + dz * fwdZ);
-              if (Math.abs(relAngleRad) > 0.35) {
-                this.directionalHits.push({
-                  id: this.nextHitId++,
-                  angleRad: relAngleRad,
-                  intensity: 1.0,
-                });
-                if (this.directionalHits.length > 5) this.directionalHits.shift();
-              }
-
-              if (this.health <= 0) {
-                this.phase = 'gameover';
-                this.sound.playGameOver();
-                if (document.pointerLockElement) document.exitPointerLock();
-              }
-              this.emitHud();
-            },
-            (kind) => this.sound.playZombieGroan(kind),
-          );
-
-          this.world.crates.forEach((c) => {
-            if (!c.collected) {
-              c.beaconRing.position.y = 1.2 + Math.sin(this.elapsed * 3.2) * 0.14;
-              c.beaconRing.rotation.z = this.elapsed * 1.4;
-            }
-          });
-
-          const allCollected = this.world.crates.every((c) => c.collected);
-          const sz = this.world.tajSafeZone;
-          if (
-            allCollected &&
-            this.playerPos.z <= sz.maxZ &&
-            this.playerPos.x >= sz.minX &&
-            this.playerPos.x <= sz.maxX
-          ) {
-            this.phase = 'victory';
-            this.sound.playVictory();
-            if (document.pointerLockElement) document.exitPointerLock();
-            this.emitHud();
-          }
-        }
-        this.world.updateGuard(this.elapsed, this.playerPos, this.radioOpen);
-      } else if (this.phase === 'start') {
+      if (this.phase === 'title') {
+        const angle = elapsed * 0.12;
         this.camera.position.set(
-          5.8 + Math.sin(this.elapsed * 0.16) * 1.4,
-          1.85 + Math.cos(this.elapsed * 0.22) * 0.12,
-          24.5,
+          Math.sin(angle) * 30,
+          7.2 + Math.sin(elapsed * 0.35) * 0.6,
+          12 + Math.cos(angle) * 22,
         );
-        this.camera.lookAt(1.5, 4.5, -62);
-        this.world.updateGuard(this.elapsed, this.playerPos, false);
+        this.camera.lookAt(0, 9.0, -34);
+      } else if (this.phase === 'playing') {
+        this.updatePlayer(dt);
+        this.updateCrates(dt, elapsed);
+        this.updateVikramOverwatch(dt);
+        this.updateEnemies(dt, elapsed);
+        this.updateFirstPersonRig(dt);
       }
 
-      this.updateAtmosphere(this.radioOpen ? 0 : dt);
-      if (this.composer) {
+      if (this.composer && !this.isSoftwareGl) {
         this.composer.render();
       } else {
         this.renderer.render(this.scene, this.camera);
       }
 
-      this.hudThrottle += rawDt;
-      if (this.hudThrottle >= 0.04) {
-        this.hudThrottle = 0;
-        this.emitHud();
+      this.hudAccumulator += dt;
+      if (this.hudAccumulator >= 0.045) {
+        this.hudAccumulator = 0;
+        this.pushHudState();
       }
 
       if (this.isSoftwareGl) {
@@ -1974,19 +1168,26 @@ export class AgraSurvivalEngine {
     };
 
     if (this.isSoftwareGl) {
-      this.afterDraw(tick);
+      this.frameId = window.setTimeout(tick, 16);
     } else {
       this.frameId = requestAnimationFrame(tick);
     }
   }
 
-  private afterDraw(cb: () => void): void {
+  private afterDraw(cb: () => void) {
     const gl = this.renderer.getContext() as WebGL2RenderingContext;
+    if (!gl || typeof gl.fenceSync !== 'function') {
+      this.frameId = window.setTimeout(cb, 80);
+      return;
+    }
     const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
     gl.flush();
     const poll = () => {
-      if (this.disposed) return;
-      const state = sync && gl.getSyncParameter(sync, gl.SYNC_STATUS);
+      if (this.disposed) {
+        if (sync) gl.deleteSync(sync);
+        return;
+      }
+      const state = sync ? gl.getSyncParameter(sync, gl.SYNC_STATUS) : gl.SIGNALED;
       if (state === gl.UNSIGNALED) {
         this.frameId = window.setTimeout(poll, 5);
       } else {
@@ -1997,152 +1198,809 @@ export class AgraSurvivalEngine {
     this.frameId = window.setTimeout(poll, 5);
   }
 
-  private emitHud(): void {
-    const w = this.mountEl.clientWidth || window.innerWidth;
-    const h = this.mountEl.clientHeight || window.innerHeight;
-    const counterIndicators: CounterIndicator[] = [];
-
+  private updateAtmosphere(dt: number, elapsed: number) {
+    // Requirement 1: Golden Dusk -> Dark Moonlit Nightfall Cycle (no purple world fog)
     if (this.phase === 'playing') {
-      for (const z of this.zombies.zombies) {
-        if (z.state !== 'windup') continue;
-        const headOffset = z.kind === 'brute' ? 2.85 : z.kind === 'dog' ? 1.15 : 2.15;
-        _projVec.set(z.pos.x, z.pos.y + headOffset, z.pos.z);
-        _projVec.project(this.camera);
-        if (_projVec.z > 0 && _projVec.z < 1) {
-          const rawSx = (_projVec.x * 0.5 + 0.5) * w;
-          const rawSy = (-_projVec.y * 0.5 + 0.5) * h;
-          if (rawSx >= -40 && rawSx <= w + 40 && rawSy >= -40 && rawSy <= h + 40) {
-            counterIndicators.push({
-              id: z.id,
-              x: Math.max(40, Math.min(w - 40, rawSx)),
-              y: Math.max(58, Math.min(h - 48, rawSy)),
-              progress: Math.max(0, z.stateTimer / z.windupDuration),
-            });
-          }
-        }
-      }
+      this.cycleTime = Math.min(1, this.cycleTime + dt / 95);
+    }
+    const t = THREE.MathUtils.smoothstep(this.cycleTime, 0.15, 0.85);
+
+    _cLerp.copy(_cSkyDusk).lerp(_cSkyNight, t);
+    (this.scene.background as THREE.Color).copy(_cLerp);
+
+    if (this.scene.fog instanceof THREE.FogExp2) {
+      this.scene.fog.color.copy(_cFogDusk).lerp(_cFogNight, t);
+      this.scene.fog.density = THREE.MathUtils.lerp(0.0092, 0.0112, t);
     }
 
-    let interactionPrompt = '';
-    const cratesCollected = this.world.crates.filter((c) => c.collected).length;
-    const nearGuardTower = this.phase === 'playing' && this.isNearGuardTower();
-    if (this.phase === 'playing' && !this.radioOpen) {
-      if (this.wallRunSide !== 0) {
-        interactionPrompt = '[SPACE] Tic-Tac Wall Kick';
-      } else if (this.activeZipline) {
-        interactionPrompt = '[SPACE] Launch Off Zipline';
-      } else if (counterIndicators.length > 0) {
-        interactionPrompt = '[Right-Click] Counter Incoming Strike!';
-      } else {
-        for (const c of this.world.crates) {
-          if (!c.collected && this.playerPos.distanceTo(c.position) < 3.6) {
-            interactionPrompt = `[E] Scavenge ${c.label}`;
-            break;
-          }
-        }
-        if (!interactionPrompt && nearGuardTower) {
-          interactionPrompt = '[E] Radio Watchtower Guard';
-        }
-        if (!interactionPrompt && this.findNearbyZipline()) {
-          interactionPrompt = '[E] Ride Rooftop Zipline';
-        }
-        if (!interactionPrompt && this.canMantle) {
-          interactionPrompt = '[SPACE] Climb / Speed Vault';
-        }
-        if (!interactionPrompt && !this.onGround && this.playerVel.y < -9.5) {
-          interactionPrompt = '[C / Ctrl] Safety Landing Roll';
-        }
-        if (!interactionPrompt && cratesCollected === this.world.crates.length) {
-          interactionPrompt = 'All Antizin Secured — Return to the Taj Mahal UV Safe House Gate!';
-        }
-      }
-    }
+    // Keep Sky Dome & Sun Halo anchored around camera horizon
+    this.skyDome.position.copy(this.camera.position);
+    this.skyMat.uniforms.uNightT.value = t;
+    this.sunSprite.position
+      .copy(_sunDirDusk)
+      .multiplyScalar(210)
+      .add(this.camera.position);
+    this.sunSprite.material.opacity = Math.max(0, 0.92 * (1 - t * 1.15));
+    this.sunSprite.visible = this.sunSprite.material.opacity > 0.02;
 
-    const playerHeadingRad = -this.yaw;
-    const tajBearingRad = Math.atan2(
-      this.world.tajGateCenter.x - this.playerPos.x,
-      -(this.world.tajGateCenter.z - this.playerPos.z),
+    this.keyLight.color.copy(_cKeyDusk).lerp(_cKeyNight, t);
+    this.keyLight.intensity = THREE.MathUtils.lerp(2.45, 1.65, t);
+    this.keyLight.position.set(
+      THREE.MathUtils.lerp(-62, 28, t),
+      THREE.MathUtils.lerp(25, 54, t),
+      THREE.MathUtils.lerp(-42, 22, t),
     );
-    let nearestCrateBearingRad: number | null = null;
-    let nearestCrateDistance: number | null = null;
-    for (const c of this.world.crates) {
-      if (c.collected) continue;
-      const dist = this.playerPos.distanceTo(c.position);
-      if (nearestCrateDistance === null || dist < nearestCrateDistance) {
-        nearestCrateDistance = Math.round(dist);
-        nearestCrateBearingRad = Math.atan2(
-          c.position.x - this.playerPos.x,
-          -(c.position.z - this.playerPos.z),
-        );
+
+    this.hemiLight.color.copy(_cHemiSkyDusk).lerp(_cHemiSkyNight, t);
+    this.hemiLight.intensity = THREE.MathUtils.lerp(1.05, 0.68, t);
+
+    // Animate reflective Charbagh water pool, Al-Kawthar ripples & fountain jets
+    this.textures.waterNormal.offset.y = (elapsed * 0.038) % 1;
+    this.textures.waterNormal.offset.x = Math.sin(elapsed * 0.28) * 0.04;
+    this.world.fountainJets.forEach((jet, idx) => {
+      jet.scale.y = 0.9 + Math.sin(elapsed * 7 + idx) * 0.14;
+    });
+    this.world.rippleRings.forEach((ring) => {
+      const phase = ((elapsed * 0.45 + Number(ring.userData?.phase ?? 0)) % 1);
+      const s = 0.8 + phase * 2.5;
+      ring.scale.set(s, s, 1);
+      (ring.material as THREE.MeshBasicMaterial).opacity = (1 - phase) * 0.42;
+    });
+    this.world.headlightMats.forEach((mat, idx) => {
+      const flicker = Math.sin(elapsed * (17 + idx * 5)) * Math.cos(elapsed * 7.3) > -0.35 ? 1 : 0.18;
+      mat.color.setRGB(1.0 * flicker, 0.92 * flicker, 0.72 * flicker);
+    });
+
+    const uvMat = this.world.uvBarrierMesh.material as THREE.MeshStandardMaterial;
+    uvMat.opacity = 0.14 + Math.sin(elapsed * 2.4) * 0.03;
+
+    if (this.vikramTimer > 0) this.vikramTimer = Math.max(0, this.vikramTimer - dt);
+    if (this.parkourLabelTimer > 0) {
+      this.parkourLabelTimer = Math.max(0, this.parkourLabelTimer - dt);
+      if (this.parkourLabelTimer === 0) this.parkourLabel = '';
+    }
+    if (this.damageFlash > 0) this.damageFlash = Math.max(0, this.damageFlash - dt * 2.5);
+  }
+
+  private updateVfx(dt: number) {
+    for (let i = this.vfxRings.length - 1; i >= 0; i--) {
+      const r = this.vfxRings[i];
+      r.age += dt;
+      const p = Math.min(1, r.age / r.maxAge);
+      const s = 0.5 + p * r.maxScale;
+      r.mesh.scale.set(s, s, 1);
+      (r.mesh.material as THREE.MeshBasicMaterial).opacity = (1 - p) * 0.85;
+      if (r.age >= r.maxAge) {
+        this.scene.remove(r.mesh);
+        (r.mesh.material as THREE.Material).dispose();
+        this.vfxRings.splice(i, 1);
       }
     }
+
+    for (let i = this.tracers.length - 1; i >= 0; i--) {
+      const tr = this.tracers[i];
+      tr.age += dt;
+      if (tr.age >= 0.08) {
+        this.scene.remove(tr.line);
+        tr.line.geometry.dispose();
+        (tr.line.material as THREE.Material).dispose();
+        this.tracers.splice(i, 1);
+      }
+    }
+  }
+
+  private updateCrates(dt: number, elapsed: number) {
+    // Pulse GRE beacon rings
+    for (const c of this.world.crates) {
+      if (!c.state.collected) {
+        const s = 0.92 + Math.sin(elapsed * 4.5) * 0.12;
+        c.beaconRing.scale.set(s, s, 1);
+      }
+    }
+
+    const near = this.getNearestUncollectedCrate(3.4);
+    if (near && this.keys.has('KeyE')) {
+      this.unlockHoldTimer += dt;
+      if (this.unlockHoldTimer >= 2.5) {
+        this.unlockHoldTimer = 0;
+        near.state.collected = true;
+        near.beaconMat.color.setHex(0x22c55e);
+        near.beaconRing.visible = false;
+        this.audio.playCrateUnlock();
+        this.score += 350;
+        this.pistolReserve = Math.min(96, this.pistolReserve + 24);
+        this.gesturePose = 'thumbsUp';
+        this.gestureTimer = 1.8;
+
+        const collectedCount = this.world.crates.filter((c) => c.state.collected).length;
+        if (collectedCount === 1) {
+          this.setVikramCallout(VIKRAM_CALLOUTS.crateOne, 6.5);
+        } else if (collectedCount === 2) {
+          this.setVikramCallout(VIKRAM_CALLOUTS.crateTwo, 6.5);
+        } else {
+          this.setVikramCallout(VIKRAM_CALLOUTS.allCrates, 8.0);
+        }
+        this.setParkourLabel(`ANTIZIN RECOVERED (${collectedCount}/3)`);
+      }
+    } else {
+      this.unlockHoldTimer = 0;
+    }
+
+    // Check mission completion when all 3 crates collected & player reaches Taj UV Safe House Gate
+    const allDone = this.world.crates.every((c) => c.state.collected);
+    if (allDone) {
+      const distSafe = Math.hypot(
+        this.playerPos.x - this.world.safeHouseCenter.x,
+        this.playerPos.z - this.world.safeHouseCenter.z,
+      );
+      if (distSafe <= this.world.safeHouseRadius) {
+        this.phase = 'victory';
+        if (document.pointerLockElement === this.renderer.domElement) {
+          document.exitPointerLock();
+        }
+        this.pushHudState();
+      }
+    }
+  }
+
+  private updateVikramOverwatch(dt: number) {
+    if (this.vikramFlashTimer > 0) {
+      this.vikramFlashTimer -= dt;
+      if (this.vikramFlashTimer <= 0) {
+        this.world.vikramMuzzleFlash.visible = false;
+      }
+    }
+
+    this.vikramFireTimer -= dt;
+    if (this.vikramFireTimer > 0) return;
+
+    // Find closest zombie within 18m of Havildar Vikram's Watchtower
+    let closest: EnemyActor | null = null;
+    let bestD = 18.0;
+    for (const e of this.enemies) {
+      if (e.dead) continue;
+      const d = Math.hypot(
+        e.root.position.x - this.world.watchtowerPos.x,
+        e.root.position.z - this.world.watchtowerPos.z,
+      );
+      if (d < bestD) {
+        bestD = d;
+        closest = e;
+      }
+    }
+
+    if (closest) {
+      this.vikramFireTimer = 1.65;
+      const dx = closest.root.position.x - this.world.watchtowerPos.x;
+      const dz = closest.root.position.z - (this.world.watchtowerPos.z + 1.2);
+      this.world.vikramNpc.rotation.y = Math.atan2(dx, dz);
+
+      this.world.vikramMuzzleFlash.visible = true;
+      this.vikramFlashTimer = 0.09;
+      this.audio.playGunshot();
+
+      const muzzleOrigin = new THREE.Vector3(
+        this.world.watchtowerPos.x,
+        4.48,
+        this.world.watchtowerPos.z + 1.2,
+      );
+      const hitPos = closest.root.position.clone().setY(1.25);
+      this.spawnBulletTracer(muzzleOrigin, hitPos);
+
+      this.applyDamageToEnemy(closest, 24, 3.0, false, false);
+    } else {
+      this.vikramFireTimer = 0.5;
+    }
+  }
+
+  private updatePlayer(dt: number) {
+    if (this.swingTimer > 0) this.swingTimer = Math.max(0, this.swingTimer - dt);
+    if (this.counterAnimTimer > 0) this.counterAnimTimer = Math.max(0, this.counterAnimTimer - dt);
+    if (this.leftJabTimer > 0) this.leftJabTimer = Math.max(0, this.leftJabTimer - dt);
+    if (this.gestureTimer > 0) {
+      this.gestureTimer = Math.max(0, this.gestureTimer - dt);
+      if (this.gestureTimer === 0) this.gesturePose = 'open';
+    }
+    if (this.pistolFireTimer > 0) this.pistolFireTimer = Math.max(0, this.pistolFireTimer - dt);
+    if (this.pistolFlashTimer > 0) {
+      this.pistolFlashTimer = Math.max(0, this.pistolFlashTimer - dt);
+      if (this.pistolFlashTimer <= 0) this.pistolMuzzleFlash.visible = false;
+    }
+    if (this.pistolReloadTimer > 0) {
+      this.pistolReloadTimer = Math.max(0, this.pistolReloadTimer - dt);
+      if (this.pistolReloadTimer === 0) {
+        const needed = this.pistolMagSize - this.pistolAmmo;
+        const take = Math.min(needed, this.pistolReserve);
+        this.pistolAmmo += take;
+        this.pistolReserve -= take;
+      }
+    }
+    this.slideKick = THREE.MathUtils.damp(this.slideKick, 0, 22, dt);
+    if (this.takedownTimer > 0) this.takedownTimer = Math.max(0, this.takedownTimer - dt);
+    if (this.dropkickTimer > 0) this.dropkickTimer = Math.max(0, this.dropkickTimer - dt);
+
+    if (this.combo > 0) {
+      this.comboDecayTimer -= dt;
+      if (this.comboDecayTimer <= 0) this.combo = 0;
+    }
+
+    const distSafe = Math.hypot(
+      this.playerPos.x - this.world.safeHouseCenter.x,
+      this.playerPos.z - this.world.safeHouseCenter.z,
+    );
+    const inSafe = distSafe <= this.world.safeHouseRadius;
+    if (inSafe && !this.wasInSafeHouse) {
+      this.setVikramCallout(VIKRAM_CALLOUTS.safehouse, 5.0);
+      this.pistolReserve = Math.max(this.pistolReserve, 72);
+    }
+    this.wasInSafeHouse = inSafe;
+    if (inSafe && this.health < this.maxHealth) {
+      this.health = Math.min(this.maxHealth, this.health + dt * 8.0);
+    }
+
+    if (this.climbSoundCooldown > 0) this.climbSoundCooldown = Math.max(0, this.climbSoundCooldown - dt);
+
+    if (this.activeClimb) {
+      const c = this.activeClimb;
+      this.playerPos.x = THREE.MathUtils.damp(this.playerPos.x, c.x, 12, dt);
+      this.playerPos.z = THREE.MathUtils.damp(this.playerPos.z, c.z, 12, dt);
+      const climbDir = (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0);
+      this.playerPos.y += climbDir * 4.8 * dt;
+      this.playerVel.set(0, 0, 0);
+      this.grounded = false;
+
+      if (climbDir !== 0) {
+        this.bobPhase += dt * 9.5;
+        if (this.climbSoundCooldown <= 0) {
+          this.climbSoundCooldown = 0.24;
+          this.audio.playParkour();
+        }
+      }
+
+      if (this.playerPos.y >= c.yMax - 0.15) {
+        this.vaultTimer = 0.28;
+        this.vaultTarget.set(c.exitX, c.yMax, c.exitZ);
+        this.activeClimb = null;
+        this.audio.playParkour();
+        this.setParkourLabel('SUMMIT MANTLE');
+      } else if (this.playerPos.y < c.yMin - 0.15) {
+        this.playerPos.y = c.yMin;
+        this.activeClimb = null;
+        this.grounded = true;
+        this.setParkourLabel('DISMOUNT');
+      }
+    } else if (this.vaultTimer > 0) {
+      this.vaultTimer = Math.max(0, this.vaultTimer - dt);
+      const alpha = 1 - Math.exp(-16 * dt);
+      this.playerPos.lerp(this.vaultTarget, alpha);
+      this.playerPos.y = Math.max(
+        this.playerPos.y,
+        this.vaultTarget.y + Math.sin((this.vaultTimer / 0.34) * Math.PI) * 0.75,
+      );
+      if (this.vaultTimer === 0) {
+        this.playerPos.copy(this.vaultTarget);
+        this.playerVel.y = 0;
+        this.grounded = true;
+      }
+    } else {
+      this.getForwardVector(_forward);
+      _right.crossVectors(_forward, _up).normalize();
+
+      const moveF = (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0);
+      const moveR = (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0);
+
+      const wantsSprint = (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) && moveF > 0;
+      const isSprinting = wantsSprint && this.stamina > 2 && this.slideTimer <= 0;
+
+      if (isSprinting) {
+        this.stamina = Math.max(0, this.stamina - dt * 15);
+      } else {
+        this.stamina = Math.min(this.maxStamina, this.stamina + dt * 20);
+      }
+
+      if (this.slideTimer > 0) {
+        this.slideTimer = Math.max(0, this.slideTimer - dt);
+        _v1.copy(_forward).multiplyScalar(11.5);
+        this.playerVel.x = THREE.MathUtils.damp(this.playerVel.x, _v1.x, 10, dt);
+        this.playerVel.z = THREE.MathUtils.damp(this.playerVel.z, _v1.z, 10, dt);
+      } else if (this.lungeTimer > 0) {
+        this.lungeTimer = Math.max(0, this.lungeTimer - dt);
+        this.playerVel.x = this.lungeDir.x;
+        this.playerVel.z = this.lungeDir.z;
+      } else {
+        _v1.set(0, 0, 0).addScaledVector(_forward, moveF).addScaledVector(_right, moveR);
+        if (_v1.lengthSq() > 0.001) _v1.normalize();
+        const speed = isSprinting ? 9.6 : 6.2;
+        this.playerVel.x = THREE.MathUtils.damp(this.playerVel.x, _v1.x * speed, 12, dt);
+        this.playerVel.z = THREE.MathUtils.damp(this.playerVel.z, _v1.z * speed, 12, dt);
+      }
+
+      this.playerVel.y -= 19.5 * dt;
+      this.playerPos.x += this.playerVel.x * dt;
+      this.playerPos.z += this.playerVel.z * dt;
+      this.playerPos.y += this.playerVel.y * dt;
+
+      this.playerPos.x = THREE.MathUtils.clamp(this.playerPos.x, -52, 52);
+      this.playerPos.z = THREE.MathUtils.clamp(this.playerPos.z, -76, 54);
+
+      let floorY = 0;
+
+      // Wooden Parkour Ramp Height Calculation
+      for (const ramp of this.world.ramps) {
+        if (
+          Math.abs(this.playerPos.x - ramp.x) <= ramp.halfW &&
+          Math.abs(this.playerPos.z - ramp.z) <= ramp.halfD
+        ) {
+          let frac = 0;
+          if (ramp.axis === 'z-') {
+            frac = (ramp.z + ramp.halfD - this.playerPos.z) / (ramp.halfD * 2);
+          } else if (ramp.axis === 'z+') {
+            frac = (this.playerPos.z - (ramp.z - ramp.halfD)) / (ramp.halfD * 2);
+          } else if (ramp.axis === 'x+') {
+            frac = (this.playerPos.x - (ramp.x - ramp.halfW)) / (ramp.halfW * 2);
+          } else {
+            frac = (ramp.x + ramp.halfW - this.playerPos.x) / (ramp.halfW * 2);
+          }
+          const rampY = THREE.MathUtils.lerp(ramp.yLow, ramp.yHigh, THREE.MathUtils.clamp(frac, 0, 1));
+          if (this.playerPos.y >= rampY - 0.85) {
+            floorY = Math.max(floorY, rampY);
+          }
+        }
+      }
+
+      // Box Obstacles & Elevated Bazaar Rooftop Floors
+      const pRad = 0.45;
+      for (const obs of this.world.obstacles) {
+        const dx = this.playerPos.x - obs.x;
+        const dz = this.playerPos.z - obs.z;
+        const overlapX = obs.halfW + pRad - Math.abs(dx);
+        const overlapZ = obs.halfD + pRad - Math.abs(dz);
+        if (overlapX > 0 && overlapZ > 0) {
+          if (this.playerPos.y >= obs.height - 0.4 && this.playerVel.y <= 0) {
+            floorY = Math.max(floorY, obs.height);
+          } else if (this.playerPos.y < obs.height - 0.4) {
+            if (overlapX < overlapZ) {
+              this.playerPos.x += dx > 0 ? overlapX : -overlapX;
+            } else {
+              this.playerPos.z += dz > 0 ? overlapZ : -overlapZ;
+            }
+          }
+        }
+      }
+
+      if (this.playerPos.y <= floorY) {
+        this.playerPos.y = floorY;
+        this.playerVel.y = 0;
+        this.grounded = true;
+      } else {
+        this.grounded = false;
+      }
+    }
+
+    const targetEye = this.slideTimer > 0 ? 0.92 : this.eyeHeight;
+    this.currentEyeHeight = THREE.MathUtils.damp(this.currentEyeHeight, targetEye, 14, dt);
+
+    const horizSpeed = Math.hypot(this.playerVel.x, this.playerVel.z);
+    if (this.grounded && horizSpeed > 0.6 && this.slideTimer <= 0) {
+      this.bobPhase += dt * horizSpeed * 1.45;
+    }
+    const bobOffset =
+      this.grounded && this.slideTimer <= 0
+        ? Math.sin(this.bobPhase) * 0.045 * Math.min(1, horizSpeed / 6)
+        : 0;
+
+    this.camera.position.set(
+      this.playerPos.x,
+      this.playerPos.y + this.currentEyeHeight + bobOffset,
+      this.playerPos.z,
+    );
+    const slideTilt = this.slideTimer > 0 ? -0.11 : 0;
+    this.camera.rotation.set(this.pitch, this.yaw, slideTilt, 'YXZ');
+
+    const targetFov = horizSpeed > 7.5 || this.lungeTimer > 0 ? 84 : 76;
+    if (Math.abs(this.camera.fov - targetFov) > 0.1) {
+      this.camera.fov = THREE.MathUtils.damp(this.camera.fov, targetFov, 8, dt);
+      this.camera.updateProjectionMatrix();
+    }
+  }
+
+  private updateFirstPersonRig(dt: number) {
+    const idleX = Math.sin(this.bobPhase * 0.5) * 0.011;
+    const idleY = Math.cos(this.bobPhase) * 0.012;
+
+    if (this.weapon === 'pistol') {
+      // Exact two-tone tactical pistol & tan/black glove pose from image_70c3ca82.png + ADS + Recoil
+      const ads = this.aimingDownSights && this.pistolReloadTimer <= 0 ? 1 : 0;
+      const reloadDrop = this.pistolReloadTimer > 0 ? Math.sin((this.pistolReloadTimer / 1.05) * Math.PI) * 0.24 : 0;
+      const recoilKick = this.slideKick;
+
+      const targetX = THREE.MathUtils.lerp(0.28 + idleX * 0.6, 0.018, ads);
+      const targetY = THREE.MathUtils.lerp(-0.22 + idleY * 0.6, -0.145, ads) - reloadDrop + recoilKick * 0.025;
+      const targetZ = THREE.MathUtils.lerp(-0.37, -0.32, ads) + recoilKick * 0.042;
+
+      this.rightArm.position.x = THREE.MathUtils.damp(this.rightArm.position.x, targetX, 18, dt);
+      this.rightArm.position.y = THREE.MathUtils.damp(this.rightArm.position.y, targetY, 18, dt);
+      this.rightArm.position.z = THREE.MathUtils.damp(this.rightArm.position.z, targetZ, 18, dt);
+
+      const targetRotX = THREE.MathUtils.lerp(0.06, 0.01, ads) + recoilKick * 0.26 - reloadDrop * 1.4;
+      const targetRotY = THREE.MathUtils.lerp(0.16, 0.0, ads);
+      const targetRotZ = THREE.MathUtils.lerp(0.22, 0.04, ads);
+      this.rightArm.rotation.x = THREE.MathUtils.damp(this.rightArm.rotation.x, targetRotX, 18, dt);
+      this.rightArm.rotation.y = THREE.MathUtils.damp(this.rightArm.rotation.y, targetRotY, 18, dt);
+      this.rightArm.rotation.z = THREE.MathUtils.damp(this.rightArm.rotation.z, targetRotZ, 18, dt);
+
+      this.rightHandPivot.rotation.x = THREE.MathUtils.damp(this.rightHandPivot.rotation.x, 0.02, 16, dt);
+      this.rightHandPivot.rotation.y = THREE.MathUtils.damp(this.rightHandPivot.rotation.y, -0.12, 16, dt);
+      this.rightHandPivot.rotation.z = THREE.MathUtils.damp(this.rightHandPivot.rotation.z, 0.14, 16, dt);
+    } else {
+      let swingRotX = 0;
+      let swingRotY = 0;
+      let swingRotZ = 0;
+      let swingPosX = 0.32 + idleX;
+      let swingPosZ = -0.41;
+      if (this.takedownTimer > 0) {
+        const p = 1 - this.takedownTimer / 0.48;
+        swingRotX = -Math.sin(p * Math.PI) * 1.15;
+        swingRotY = Math.sin(p * Math.PI) * 0.55;
+        swingRotZ = Math.sin(p * Math.PI) * 0.65;
+        swingPosX = 0.32 - Math.sin(p * Math.PI) * 0.14;
+        swingPosZ = -0.41 - Math.sin(p * Math.PI) * 0.22;
+      } else if (this.swingTimer > 0) {
+        const dur = this.weapon === 'kukri' ? 0.3 : 0.38;
+        const p = 1 - this.swingTimer / dur;
+        swingRotX = -Math.sin(p * Math.PI) * 0.92;
+        swingRotY = Math.sin(p * Math.PI) * 0.58;
+        swingRotZ = Math.sin(p * Math.PI) * 0.72;
+        swingPosX = 0.32 - Math.sin(p * Math.PI) * 0.12;
+        swingPosZ = -0.41 - Math.sin(p * Math.PI) * 0.15;
+      }
+
+      this.rightArm.position.set(swingPosX, -0.28 + idleY, swingPosZ);
+      this.rightArm.rotation.set(swingRotX, swingRotY, swingRotZ);
+      this.rightHandPivot.rotation.x = THREE.MathUtils.damp(this.rightHandPivot.rotation.x, 0.18, 16, dt);
+      this.rightHandPivot.rotation.y = THREE.MathUtils.damp(this.rightHandPivot.rotation.y, 0.32, 16, dt);
+      this.rightHandPivot.rotation.z = THREE.MathUtils.damp(this.rightHandPivot.rotation.z, 0.36, 16, dt);
+    }
+
+    // Left articulated bare hand + cyan watch: supports Open, Fist Jab/Parry, Point, Peace V, ThumbsUp
+    const parryLift =
+      this.counterAnimTimer > 0 ? Math.sin((1 - this.counterAnimTimer / 0.34) * Math.PI) * 0.26 : 0;
+    const jabThrust =
+      this.leftJabTimer > 0 ? Math.sin((1 - this.leftJabTimer / 0.34) * Math.PI) : 0;
+    const gestureActive = this.gestureTimer > 0 && this.leftJabTimer <= 0 && this.counterAnimTimer <= 0 ? 1 : 0;
+
+    let activeLeftPose: HandPose = this.gestureTimer > 0 ? this.gesturePose : 'open';
+    if (this.counterAnimTimer > 0 || this.leftJabTimer > 0 || this.activeClimb) {
+      activeLeftPose = 'fist';
+    }
+
+    const leftX = -0.34 - idleX + jabThrust * 0.19 + gestureActive * 0.11;
+    const leftY = -0.27 + idleY + parryLift + jabThrust * 0.12 + gestureActive * 0.08;
+    const leftZ = -0.43 - parryLift * 0.26 - jabThrust * 0.24 - gestureActive * 0.04;
+    this.leftArm.position.set(leftX, leftY, leftZ);
+    this.leftArm.rotation.set(parryLift * 1.2 + jabThrust * 0.35, -jabThrust * 0.35, -parryLift * 0.65);
+
+    // Angle the left wrist nicely when showing hand signs (thumbsUp / peace / point / fist)
+    let lpX = -0.46;
+    let lpY = 0.24;
+    let lpZ = -0.78;
+    if (activeLeftPose === 'fist') {
+      lpX = -0.95;
+      lpY = 0.38;
+      lpZ = -0.35;
+    } else if (activeLeftPose === 'thumbsUp') {
+      lpX = -0.18;
+      lpY = 0.65;
+      lpZ = -0.25;
+    } else if (activeLeftPose === 'peace') {
+      lpX = -0.15;
+      lpY = 0.18;
+      lpZ = -0.18;
+    } else if (activeLeftPose === 'point') {
+      lpX = -1.15;
+      lpY = 0.14;
+      lpZ = -0.22;
+    }
+    this.leftHandPivot.rotation.x = THREE.MathUtils.damp(this.leftHandPivot.rotation.x, lpX, 14, dt);
+    this.leftHandPivot.rotation.y = THREE.MathUtils.damp(this.leftHandPivot.rotation.y, lpY, 14, dt);
+    this.leftHandPivot.rotation.z = THREE.MathUtils.damp(this.leftHandPivot.rotation.z, lpZ, 14, dt);
+
+    const rightPose: HandPose = this.weapon === 'pistol' ? 'gripPistol' : 'gripMelee';
+    this.updateHandPoses(activeLeftPose, rightPose, dt, this.slideKick);
+
+    this.dropkickLeg.visible = this.dropkickTimer > 0;
+    if (this.dropkickTimer > 0) {
+      const p = 1 - this.dropkickTimer / 0.48;
+      this.dropkickLeg.position.z = -0.25 - Math.sin(p * Math.PI) * 0.52;
+      this.dropkickLeg.position.y = -0.52 + Math.sin(p * Math.PI) * 0.3;
+    }
+  }
+
+  private updateEnemies(dt: number, elapsed: number) {
+    let aliveCount = 0;
+
+    for (let i = this.enemies.length - 1; i >= 0; i--) {
+      const e = this.enemies[i];
+      if (e.dead) {
+        e.deathTimer -= dt;
+        e.bodyPivot.rotation.x = THREE.MathUtils.damp(e.bodyPivot.rotation.x, -Math.PI / 2, 9, dt);
+        e.root.position.y = THREE.MathUtils.damp(e.root.position.y, -0.25, 6, dt);
+        if (e.deathTimer <= 0) {
+          this.scene.remove(e.root);
+          this.enemies.splice(i, 1);
+        }
+        continue;
+      }
+
+      aliveCount++;
+      if (e.hitFlashTimer > 0) e.hitFlashTimer = Math.max(0, e.hitFlashTimer - dt);
+      if (e.attackCooldown > 0) e.attackCooldown = Math.max(0, e.attackCooldown - dt);
+
+      if (e.staggerTimer > 0) {
+        e.staggerTimer = Math.max(0, e.staggerTimer - dt);
+        e.bodyPivot.rotation.x = THREE.MathUtils.damp(e.bodyPivot.rotation.x, -0.25, 10, dt);
+      } else {
+        e.bodyPivot.rotation.x = THREE.MathUtils.damp(e.bodyPivot.rotation.x, 0.08, 10, dt);
+
+        _v1.subVectors(this.playerPos, e.root.position);
+        _v1.y = 0;
+        const dist = _v1.length();
+
+        const dxSh = e.root.position.x - this.world.safeHouseCenter.x;
+        const dzSh = e.root.position.z - this.world.safeHouseCenter.z;
+        const distSh = Math.hypot(dxSh, dzSh);
+        if (distSh < this.world.safeHouseRadius + 0.8) {
+          const pushX = dxSh / Math.max(0.01, distSh);
+          const pushZ = dzSh / Math.max(0.01, distSh);
+          e.velocity.x += pushX * 22 * dt;
+          e.velocity.z += pushZ * 22 * dt;
+        } else if (dist > 0.01) {
+          _v1.divideScalar(dist);
+          e.root.rotation.y = Math.atan2(_v1.x, _v1.z);
+
+          if (dist > 1.75) {
+            e.velocity.x = THREE.MathUtils.damp(e.velocity.x, _v1.x * e.speed, 6, dt);
+            e.velocity.z = THREE.MathUtils.damp(e.velocity.z, _v1.z * e.speed, 6, dt);
+          } else {
+            e.velocity.x = THREE.MathUtils.damp(e.velocity.x, 0, 10, dt);
+            e.velocity.z = THREE.MathUtils.damp(e.velocity.z, 0, 10, dt);
+            if (
+              e.windupTimer <= 0 &&
+              e.attackCooldown <= 0 &&
+              Math.abs(this.playerPos.y - e.root.position.y) < 1.8
+            ) {
+              e.windupTimer = 0.78;
+            }
+          }
+        }
+      }
+
+      if (e.windupTimer > 0) {
+        e.windupTimer -= dt;
+        e.counterIcon.visible = true;
+        e.counterIcon.lookAt(this.camera.position);
+        e.counterIcon.scale.setScalar(0.95 + Math.sin(elapsed * 22) * 0.15);
+
+        if (e.windupTimer <= 0) {
+          e.counterIcon.visible = false;
+          e.attackCooldown = 1.25;
+          const distNow = e.root.position.distanceTo(this.playerPos);
+          if (distNow < 2.4 && Math.abs(this.playerPos.y - e.root.position.y) < 1.8) {
+            this.health = Math.max(0, this.health - e.damage);
+            this.combo = 0;
+            this.damageFlash = 1.0;
+            this.audio.playHurt();
+            if (this.health <= 0) {
+              this.phase = 'gameover';
+              if (document.pointerLockElement === this.renderer.domElement) {
+                document.exitPointerLock();
+              }
+              this.pushHudState();
+            }
+          }
+        }
+      } else {
+        e.counterIcon.visible = false;
+      }
+
+      e.root.position.x = THREE.MathUtils.clamp(e.root.position.x + e.velocity.x * dt, -50, 50);
+      e.root.position.z = THREE.MathUtils.clamp(e.root.position.z + e.velocity.z * dt, -38, 54);
+      e.velocity.x = THREE.MathUtils.damp(e.velocity.x, 0, 5, dt);
+      e.velocity.z = THREE.MathUtils.damp(e.velocity.z, 0, 5, dt);
+
+      const speedMag = Math.hypot(e.velocity.x, e.velocity.z);
+      e.walkPhase += dt * (2.5 + speedMag * 1.8);
+      const stride = Math.sin(e.walkPhase) * Math.min(0.65, speedMag * 0.15);
+      e.leftLeg.rotation.x = stride;
+      e.rightLeg.rotation.x = -stride;
+      if (e.kind === 'hound') {
+        e.leftArm.rotation.x = -stride;
+        e.rightArm.rotation.x = stride;
+      } else {
+        const windupLift = e.windupTimer > 0 ? -1.15 : -0.45;
+        e.leftArm.rotation.x = windupLift + stride * 0.35;
+        e.rightArm.rotation.x = windupLift - stride * 0.35;
+      }
+    }
+
+    // Crowd separation physics (no stacking)
+    for (let i = 0; i < this.enemies.length; i++) {
+      const a = this.enemies[i];
+      if (a.dead) continue;
+      for (let j = i + 1; j < this.enemies.length; j++) {
+        const b = this.enemies[j];
+        if (b.dead) continue;
+        const dx = a.root.position.x - b.root.position.x;
+        const dz = a.root.position.z - b.root.position.z;
+        const minDist = a.radius + b.radius + 0.22;
+        const distSq = dx * dx + dz * dz;
+        if (distSq < minDist * minDist) {
+          const dist = Math.sqrt(Math.max(0.0001, distSq));
+          const overlap = (minDist - dist) * 0.5;
+          const nx = dx / dist;
+          const nz = dz / dist;
+          a.root.position.x += nx * overlap;
+          a.root.position.z += nz * overlap;
+          b.root.position.x -= nx * overlap;
+          b.root.position.z -= nz * overlap;
+        }
+      }
+    }
+
+    // Ambient courtyard replenishment during the 3-crate Antizin mission
+    this.spawnTimer += dt;
+    if (aliveCount < 10 && this.spawnTimer > 4.5 && this.phase === 'playing') {
+      this.spawnTimer = 0;
+      this.spawnCourtyardInfected(3);
+    }
+  }
+
+  private pushHudState() {
+    const headingDeg = ((THREE.MathUtils.radToDeg(-this.yaw) % 360) + 360) % 360;
+    const distSafe = Math.hypot(
+      this.playerPos.x - this.world.safeHouseCenter.x,
+      this.playerPos.z - this.world.safeHouseCenter.z,
+    );
+
+    const counterPrompt = this.enemies.some(
+      (e) => !e.dead && e.windupTimer > 0 && e.root.position.distanceTo(this.playerPos) < 4.6,
+    );
+
+    const alive = this.enemies.filter((e) => !e.dead);
+    const cratesCollected = this.world.crates.filter((c) => c.state.collected).length;
+    const totalCrates = this.world.crates.length;
+    const nearCrate = this.getNearestUncollectedCrate(3.4);
+
+    const markers: CompassMarker[] = [];
+    const addMarker = (id: string, label: string, x: number, z: number, kind: CompassMarker['kind']) => {
+      const dx = x - this.playerPos.x;
+      const dz = z - this.playerPos.z;
+      const distance = Math.round(Math.hypot(dx, dz));
+      const worldAngle = THREE.MathUtils.radToDeg(Math.atan2(dx, -dz));
+      let rel = ((worldAngle - headingDeg + 540) % 360) - 180;
+      if (rel < -180) rel += 360;
+      markers.push({ id, label, angleDeg: rel, distance, kind });
+    };
+
+    addMarker('taj', 'Taj', this.world.tajPosition.x, this.world.tajPosition.z, 'taj');
+    addMarker('safehouse', 'UV', this.world.safeHouseCenter.x, this.world.safeHouseCenter.z, 'safehouse');
+
+    for (const c of this.world.crates) {
+      if (!c.state.collected) {
+        addMarker(c.state.id, 'GRE', c.state.x, c.state.z, 'antizin');
+      }
+    }
+
+    const missionObjective =
+      cratesCollected < totalCrates
+        ? `Recover GRE Antizin Crates (${cratesCollected}/${totalCrates})`
+        : 'Deliver Antizin to Havildar Vikram at the Taj UV Gate';
+
+    const nearClimb = this.activeClimb ?? this.getNearestClimbable();
+    const climbPrompt = this.activeClimb
+      ? `[W/S] Climb · [Space] Mantle/Leap · [E] Dismount (${this.activeClimb.label})`
+      : nearClimb
+        ? `[E] Climb · ${nearClimb.label}`
+        : '';
+
+    const currentLeftPose: HandPose =
+      this.counterAnimTimer > 0 || this.leftJabTimer > 0 || this.activeClimb
+        ? 'fist'
+        : this.gestureTimer > 0
+          ? this.gesturePose
+          : 'open';
 
     this.onHudUpdate({
       phase: this.phase,
+      weapon: this.weapon,
+      pistolAmmo: this.pistolAmmo,
+      pistolMagSize: this.pistolMagSize,
+      pistolReserve: this.pistolReserve,
+      leftHandPose: currentLeftPose,
       health: Math.round(this.health),
       maxHealth: this.maxHealth,
       stamina: Math.round(this.stamina),
       maxStamina: this.maxStamina,
-      comboCount: this.comboCount,
-      comboTimerRatio: this.comboCount > 0 ? Math.max(0, this.comboTimer / 4.8) : 0,
-      takedownReady: this.comboCount >= 5,
-      timeOfDay: this.timeOfDay,
-      formattedTime: this.formatClock24h(),
-      isNight: this.isNightTime(),
-      cratesCollected,
-      totalCrates: this.world.crates.length,
-      crateStatuses: this.world.crates.map((c) => ({
-        id: c.id,
-        label: c.label,
-        locationHint: c.locationHint,
-        collected: c.collected,
-        distance: Math.round(this.playerPos.distanceTo(c.position)),
-      })),
-      tajDistance: Math.round(this.playerPos.distanceTo(this.world.tajGateCenter)),
-      playerHeadingRad,
-      tajBearingRad,
-      nearestCrateBearingRad,
-      nearestCrateDistance,
-      nearGuardTower,
-      radioOpen: this.radioOpen,
-      flashlightOn: this.flashlightOn,
-      firecrackerCooldown: Math.max(0, Number(this.firecrackerCooldown.toFixed(1))),
-      kickCooldown: Math.max(0, Number(this.kickCooldown.toFixed(1))),
-      canMantle: this.canMantle,
-      activeWeapon: this.viewmodel.getWeapon(),
-      timeLabel: this.getTimeLabel(),
-      subtitleText: this.subtitleTimer > 0 ? this.subtitleText : '',
-      subtitleSpeaker: this.subtitleSpeaker,
-      interactionPrompt,
-      pointerLocked: this.pointerLocked,
-      counterIndicators,
-      directionalHits: this.directionalHits.map((d) => ({ ...d })),
-      damageFlash: this.damageFlash,
-      parryFlash: this.parryFlash,
-      slowMoActive: this.slowMoTimer > 0,
-      parkourFlow: Number(this.parkourFlow.toFixed(2)),
-      parkourMove: this.parkourMoveTimer > 0 ? this.parkourMoveLabel : undefined,
-      killCount: this.killCount,
+      combo: this.combo,
       maxCombo: this.maxCombo,
-      elapsedSeconds: Math.round(this.playTimeSeconds),
+      score: this.score,
+      kills: this.kills,
+      enemiesAlive: alive.length,
+      cratesCollected,
+      totalCrates,
+      nearCrateLabel: nearCrate ? nearCrate.state.label : '',
+      unlockProgress: Math.min(1, this.unlockHoldTimer / 2.5),
+      nearWatchtower: !nearCrate && this.isNearWatchtower(),
+      climbPrompt,
+      isClimbing: Boolean(this.activeClimb),
+      missionObjective,
+      timeOfDayLabel: this.cycleTime < 0.55 ? 'Golden Dusk' : 'Nightfall',
+      cycleProgress: this.cycleTime,
+      inSafeHouse: distSafe <= this.world.safeHouseRadius,
+      counterPrompt,
+      takedownReady: this.combo >= 5,
+      parkourLabel: this.parkourLabel,
+      headingDeg,
+      markers,
+      vikramLine: this.vikramTimer > 0 ? this.vikramLine : '',
+      damageFlash: this.damageFlash,
+      playerX: this.playerPos.x,
+      playerZ: this.playerPos.z,
+      playerYaw: this.yaw,
+      crates: this.world.crates.map((c) => ({ ...c.state })),
+      safeHouseX: this.world.safeHouseCenter.x,
+      safeHouseZ: this.world.safeHouseCenter.z,
+      safeHouseRadius: this.world.safeHouseRadius,
+      watchtowerX: this.world.watchtowerPos.x,
+      watchtowerZ: this.world.watchtowerPos.z,
+      threatDots: alive.map((e) => ({ x: e.root.position.x, z: e.root.position.z })),
     });
   }
 
-  public dispose(): void {
+  public dispose() {
     this.disposed = true;
     cancelAnimationFrame(this.frameId);
     clearTimeout(this.frameId);
-    this.unbindEvents();
-    this.skyMesh.geometry.dispose();
+
+    window.removeEventListener('resize', this.handleResize);
+    window.removeEventListener('keydown', this.handleKeyDown);
+    window.removeEventListener('keyup', this.handleKeyUp);
+    window.removeEventListener('mousemove', this.handleMouseMove);
+    window.removeEventListener('mousedown', this.handleMouseDown);
+    window.removeEventListener('mouseup', this.handleMouseUp);
+    window.removeEventListener('wheel', this.handleWheel);
+    window.removeEventListener('contextmenu', this.handleContextMenu);
+    document.removeEventListener('pointerlockchange', this.handlePointerLockChange);
+    this.renderer.domElement.removeEventListener('webglcontextlost', this.handleContextLost);
+    this.renderer.domElement.removeEventListener('webglcontextrestored', this.handleContextRestored);
+
+    if (document.pointerLockElement === this.renderer.domElement) {
+      document.exitPointerLock();
+    }
+
+    this.vfxRings.forEach((r) => {
+      this.scene.remove(r.mesh);
+      (r.mesh.material as THREE.Material).dispose();
+    });
+    this.tracers.forEach((tr) => {
+      this.scene.remove(tr.line);
+      tr.line.geometry.dispose();
+      (tr.line.material as THREE.Material).dispose();
+    });
+    this.vfxRingGeo.dispose();
+    this.skyDome.geometry.dispose();
     this.skyMat.dispose();
+    this.sunSprite.material.dispose();
+    this.disposeFpRig();
+
     this.world.dispose();
-    this.viewmodel.dispose();
-    this.zombies.dispose();
+    this.entityAssets.dispose();
     this.textures.dispose();
+    this.audio.dispose();
     this.composer?.dispose();
     this.renderer.dispose();
-    if (this.renderer.domElement.parentNode === this.mountEl) {
-      this.mountEl.removeChild(this.renderer.domElement);
+    if (this.renderer.domElement.parentNode === this.container) {
+      this.container.removeChild(this.renderer.domElement);
     }
   }
 }

@@ -1,97 +1,65 @@
-import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import { GoogleGenAI } from '@google/genai';
+import type { Request, Response } from 'express';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = Number(process.env.PORT || 3000);
-const MODEL_NAME = 'gemini-2.5-flash';
+const PORT = Number(process.env.PORT) || 3000;
+const isProduction = process.env.NODE_ENV === 'production';
+const GEMINI_TIMEOUT_MS = 5000;
 
-interface RemainingCrateInfo {
-  label: string;
-  locationHint: string;
-  distance: number;
-}
-
-interface GuardGameState {
+interface VikramContext {
   cratesCollected: number;
   totalCrates: number;
-  remainingCrates: RemainingCrateInfo[];
+  timeOfDayLabel: string;
   health: number;
-  maxHealth: number;
-  formattedTime: string;
-  timeLabel: string;
-  isNight: boolean;
-  killCount: number;
-  tajDistance: number;
+  enemiesAlive: number;
+  kills: number;
 }
 
-interface HistoryTurn {
-  role: 'user' | 'model';
-  text: string;
+interface VikramRadioRequestBody {
+  message?: string;
+  context?: Partial<VikramContext>;
 }
 
-interface GuardRadioRequest {
-  message: string;
-  history?: HistoryTurn[];
-  gameState: GuardGameState;
-}
+function buildDynamicVikramFallback(playerMessage: string, ctx: VikramContext): string {
+  const q = playerMessage.toLowerCase();
+  const remaining = Math.max(0, ctx.totalCrates - ctx.cratesCollected);
+  const vitalsNote =
+    ctx.health < 45
+      ? `Your vitals are down to ${ctx.health}%—step inside the purple UV Safe House ring beneath my tower to regenerate before pushing out.`
+      : `Vitals reading ${ctx.health}% with ${ctx.enemiesAlive} infected active in the courtyard.`;
 
-function buildSystemInstruction(state: GuardGameState): string {
-  const healthPct = Math.max(
-    0,
-    Math.min(100, Math.round((state.health / Math.max(1, state.maxHealth)) * 100)),
-  );
-  const cratesRemaining = Math.max(0, state.totalCrates - state.cratesCollected);
-  const remainingSummary =
-    state.remainingCrates.length > 0
-      ? state.remainingCrates
-          .map((c) => `${c.label} at ${c.locationHint} (${c.distance}m away)`)
-          .join('; ')
-      : 'None — all 3 Antizin crates are secured. Taj Mahal UV Safe House entry is authorized.';
-
-  return [
-    'You are Havildar Vikram, a strict, disciplined, no-nonsense Indian Quarantine Force watchtower guard stationed at the Taj Mahal UV Safe House perimeter gate in Agra.',
-    'You are communicating with the field Runner over a short-range military radio from your elevated watchtower overlooking the Charbagh courtyard.',
-    '',
-    'LIVE TACTICAL TELEMETRY:',
-    `- Antizin Supplies Collected: ${state.cratesCollected}/${state.totalCrates} (${cratesRemaining} remaining)`,
-    `- Remaining Crate Locations: ${remainingSummary}`,
-    `- Runner Health: ${healthPct}%`,
-    `- Local Time & Atmosphere: ${state.formattedTime} | ${state.timeLabel}${state.isNight ? ' (NIGHTFALL ACTIVE: Night Hunters and Virals are actively prowling; UV perimeter barrier online)' : ' (Dusk approaching Nightfall)'}`,
-    `- Infected Eliminated: ${state.killCount}`,
-    `- Distance to Taj UV Gate: ${state.tajDistance}m`,
-    '',
-    'ROLEPLAY & RESPONSE RULES:',
-    '1. Stay strictly in character as Havildar Vikram. Speak in crisp, authoritative military radio English (1 to 3 short sentences max, plain text only, no markdown or bullet lists).',
-    '2. If cratesCollected < totalCrates and the Runner asks to enter, claims to be done, or reports in before finishing, firmly reprimand them in the style of: "Affirmative. Why didn\'t you complete the task? There are still crates left. Continue." — while ALSO directly answering whatever specific question they asked.',
-    '3. If the Runner asks where remaining crates are, give exact location hints and distances from the telemetry above (West Bazaar Rooftop, Reflecting Pool Ruins, or Guarded East Market Alley).',
-    '4. If the Runner asks about infected threats or survival tactics, give practical field advice grounded in this sector: Right-Click on yellow lightning bolts to counter, [C] kick or [Q] firecracker lures to break armored Brutes, rooftop ziplines/wall-runs to evade Night Hunters, and reach the purple UV gate once all 3 crates are secured.',
-    '5. If cratesCollected === totalCrates, acknowledge mission completion briskly and order the Runner inside the purple Taj Mahal UV archway immediately while you provide overwatch.',
-  ].join('\n');
-}
-
-function getApiKey(): string | undefined {
-  const key = process.env.GEMINI_API_KEY?.trim();
-  if (!key || key === 'MY_GEMINI_API_KEY') return undefined;
-  return key;
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function generateGuardReply(payload: GuardRadioRequest): Promise<string> {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error('MISSING_API_KEY');
+  if (ctx.cratesCollected >= ctx.totalCrates) {
+    return `All ${ctx.totalCrates}/${ctx.totalCrates} GRE Antizin crates are secured! Sprint back inside the Taj UV Safe House Gate now—my M16 will clear your path.`;
   }
 
-  const ai = new GoogleGenAI({
+  if (q.includes('crate') || q.includes('antizin') || q.includes('where') || q.includes('supply')) {
+    return `Status is ${ctx.cratesCollected}/${ctx.totalCrates} Antizin crates recovered (${remaining} remaining) under ${ctx.timeOfDayLabel}. Climb the wooden parkour ramps to check the East and West bazaar rooftops, and search the wrecked auto-rickshaws south—hold E for 2.5 seconds to unlock each GRE crate.`;
+  }
+
+  if (q.includes('gate') || q.includes('uv') || q.includes('safe') || q.includes('tower')) {
+    return `The Taj Mahal UV Safe House Gate sits right below my watchtower on the north-west flank. The purple UV ring keeps biters out and restores your health (currently ${ctx.health}%).`;
+  }
+
+  if (q.includes('fire') || q.includes('m16') || q.includes('cover') || q.includes('shoot') || q.includes('hazmat')) {
+    return `My M16 automatically tracks and fires covering bursts at any infected within 18 meters of the tower! Watch out for Hazmat Guards with red tanks—shatter them for a blast, and use Right-Click counters on yellow lightning attacks.`;
+  }
+
+  if (q.includes('help') || q.includes('heal') || q.includes('health') || q.includes('tip')) {
+    return `${vitalsNote} Chain 5 freeflow strikes to unleash an [R] Heavy Takedown shockwave, or use C to slide and Space to vault barricades while scavenging the remaining ${remaining} Antizin crate(s).`;
+  }
+
+  return `Copy that, survivor—${ctx.timeOfDayLabel} holds over Agra with ${ctx.cratesCollected}/${ctx.totalCrates} Antizin crates secured and ${ctx.health}% health. ${ctx.health < 50 ? 'Fall back to the UV gate to heal, then ' : 'Keep moving along the wooden ramps and '}grab the remaining ${remaining} crate(s).`;
+}
+
+function createGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+  if (!apiKey) return null;
+  return new GoogleGenAI({
     apiKey,
     httpOptions: {
       headers: {
@@ -99,120 +67,100 @@ async function generateGuardReply(payload: GuardRadioRequest): Promise<string> {
       },
     },
   });
-
-  const safeHistory = Array.isArray(payload.history)
-    ? payload.history
-        .slice(-8)
-        .filter((h) => h && (h.role === 'user' || h.role === 'model') && typeof h.text === 'string' && h.text.trim())
-        .map((h) => ({
-          role: h.role,
-          parts: [{ text: h.text.trim().slice(0, 500) }],
-        }))
-    : [];
-
-  const contents = [
-    ...safeHistory,
-    {
-      role: 'user' as const,
-      parts: [{ text: payload.message.trim().slice(0, 600) }],
-    },
-  ];
-
-  const systemInstruction = buildSystemInstruction(payload.gameState);
-
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const response = await ai.models.generateContent({
-        model: MODEL_NAME,
-        contents,
-        config: {
-          systemInstruction,
-        },
-      });
-      const text = response.text?.trim();
-      if (!text) {
-        throw new Error('Empty response from watchtower radio relay.');
-      }
-      return text;
-    } catch (err) {
-      lastError = err;
-      const msg = err instanceof Error ? err.message : String(err);
-      const isTransient = /429|500|502|503|504|RESOURCE_EXHAUSTED|UNAVAILABLE/i.test(msg);
-      if (!isTransient || attempt === 2) break;
-      await sleep(350 * Math.pow(2, attempt));
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-async function startServer(): Promise<void> {
+async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '256kb' }));
+  app.use(express.json());
 
-  app.post('/api/guard-radio', async (req, res) => {
-    const body = req.body as Partial<GuardRadioRequest> | undefined;
-    if (!body || typeof body.message !== 'string' || !body.message.trim() || !body.gameState) {
-      res.status(400).json({ error: 'Invalid radio transmission payload.' });
+  app.post('/api/vikram-radio', async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as VikramRadioRequestBody;
+    const playerMessage = typeof body.message === 'string' ? body.message.trim() : '';
+    if (!playerMessage) {
+      res.status(400).json({ error: 'Message is required.' });
       return;
     }
 
+    const rawCtx = body.context ?? {};
+    const ctx: VikramContext = {
+      cratesCollected: Number(rawCtx.cratesCollected ?? 0),
+      totalCrates: Number(rawCtx.totalCrates ?? 3),
+      timeOfDayLabel: String(rawCtx.timeOfDayLabel ?? 'Golden Dusk'),
+      health: Number(rawCtx.health ?? 100),
+      enemiesAlive: Number(rawCtx.enemiesAlive ?? 0),
+      kills: Number(rawCtx.kills ?? 0),
+    };
+
+    const ai = createGeminiClient();
+    if (!ai) {
+      res.json({
+        reply: buildDynamicVikramFallback(playerMessage, ctx),
+        fallback: true,
+      });
+      return;
+    }
+
+    const systemInstruction = [
+      'You are Havildar Vikram, a veteran Indian Army watchtower guard stationed beside the Taj Mahal Charbagh Safe House UV Gate in post-apocalyptic Agra ("Agra: Nightfall").',
+      'You are armed with an M16 providing overwatch from the tower while the player scavenges 3 glowing GRE Antizin crates across the bazaar rooftops and courtyard.',
+      `Current live status: Antizin crates recovered ${ctx.cratesCollected}/${ctx.totalCrates}, Lighting phase: ${ctx.timeOfDayLabel}, Player health: ${ctx.health}/100, Infected nearby: ${ctx.enemiesAlive}, Player kills: ${ctx.kills}.`,
+      'Respond in character over tactical radio in 1 to 3 crisp, grounded sentences. Mention relevant mission context naturally (wooden ramps to bazaar rooftops, purple UV Safe House, Hazmat explosive red tanks, Right-Click counter, or 5x [R] Heavy Takedown when helpful).',
+    ].join(' ');
+
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     try {
-      const reply = await generateGuardReply({
-        message: body.message,
-        history: body.history,
-        gameState: body.gameState,
+      const apiPromise = ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: playerMessage,
+        config: {
+          systemInstruction,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
       });
-      res.json({ reply });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg === 'MISSING_API_KEY') {
-        res.status(500).json({
-          error: 'Gemini API key is not configured. Please add GEMINI_API_KEY in Settings > Secrets.',
-        });
-        return;
-      }
-      if (/PERMISSION_DENIED|API_KEY_INVALID|403|400/i.test(msg)) {
-        res.status(401).json({
-          error: 'Gemini API key rejected. Verify GEMINI_API_KEY in Settings > Secrets.',
-        });
-        return;
-      }
-      if (/RESOURCE_EXHAUSTED|429/i.test(msg)) {
-        res.status(429).json({
-          error: 'Radio frequency congested (rate limit reached). Retry in a few seconds.',
-        });
-        return;
-      }
-      res.status(502).json({
-        error: `Watchtower radio relay failed: ${msg}`,
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error('Gemini watchtower radio timeout after 5s'));
+        }, GEMINI_TIMEOUT_MS);
       });
+
+      const response = await Promise.race([apiPromise, timeoutPromise]);
+      const reply = response.text?.trim();
+      res.json({
+        reply: reply && reply.length > 0 ? reply : buildDynamicVikramFallback(playerMessage, ctx),
+      });
+    } catch {
+      res.json({
+        reply: buildDynamicVikramFallback(playerMessage, ctx),
+        fallback: true,
+      });
+    } finally {
+      if (timeoutHandle !== undefined) {
+        clearTimeout(timeoutHandle);
+      }
     }
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
-      const indexHtml = path.join(distDir, 'index.html');
-      if (fs.existsSync(indexHtml)) {
-        res.sendFile(indexHtml);
-      } else {
-        res.status(404).send('Build output not found.');
-      }
+    app.use((_req: Request, res: Response) => {
+      res.sendFile(path.join(distDir, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Agra Quarantine server listening on http://0.0.0.0:${PORT}`);
+    console.log(`Agra: Nightfall server listening on http://0.0.0.0:${PORT}`);
   });
 }
 
