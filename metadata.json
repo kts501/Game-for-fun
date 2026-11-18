@@ -1,0 +1,6 @@
+{
+  "name": "Agra Quarantine: Taj Safe House",
+  "description": "3D first-person zombie survival, rooftop parkour, and freeflow combat set in post-apocalyptic Agra featuring a fortified Taj Mahal UV Safe House.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
